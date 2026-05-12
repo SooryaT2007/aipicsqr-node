@@ -34,7 +34,7 @@ from services.mesh_worker import MeshWorker
 from utils.logger import setup_logger
 from utils.supabase_client import get_supabase_client
 
-LOGIN_URL = 'https://aipicsqr.vercel.app/auth/login?next=/dashboard/nodes'
+LOGIN_URL = 'https://dashboard.aipicsqr.com/auth/login?next=/dashboard/nodes'
 
 # Setup logging
 logger = setup_logger('AIPICSQR-node')

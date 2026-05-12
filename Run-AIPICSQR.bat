@@ -12,13 +12,42 @@ python --version >nul 2>&1
 IF %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Python is not installed or not in your system PATH!
     echo.
-    echo Please install Python 3.10 or newer from: https://www.python.org/downloads/
-    echo.
-    echo IMPORTANT: Make sure to check the box "Add python.exe to PATH" during installation!
+    echo Please install Python 3.12 from: https://www.python.org/downloads/
+    echo IMPORTANT: Check "Add python.exe to PATH" during installation.
     echo.
     pause
     exit /b 1
 )
+
+:: 1b. Check Python version is within supported range (3.10 - 3.13)
+for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
+for /f "tokens=1,2 delims=." %%a in ("!PYVER!") do (
+    set PYMAJOR=%%a
+    set PYMINOR=%%b
+)
+IF !PYMAJOR! NEQ 3 (
+    echo [ERROR] Python 3 is required. Found: !PYVER!
+    echo Please install Python 3.12 from: https://www.python.org/downloads/
+    pause
+    exit /b 1
+)
+IF !PYMINOR! LSS 10 (
+    echo [ERROR] Python 3.10 or newer is required. Found: !PYVER!
+    echo Please install Python 3.12 from: https://www.python.org/downloads/
+    pause
+    exit /b 1
+)
+IF !PYMINOR! GEQ 14 (
+    echo [ERROR] Python !PYVER! is not yet supported by all required packages.
+    echo.
+    echo Please install Python 3.12 ^(recommended^):
+    echo   https://www.python.org/downloads/release/python-3120/
+    echo.
+    echo Python 3.14 lacks prebuilt wheels for some C-extension dependencies.
+    pause
+    exit /b 1
+)
+echo [INFO] Python !PYVER! detected. OK.
 
 :: 2. Check for .env file
 IF NOT EXIST ".env" (
@@ -49,8 +78,8 @@ call venv\Scripts\activate.bat
 
 :: 5. Install Dependencies
 echo [INFO] Installing/Updating required packages...
-python -m pip install --upgrade pip -q
-pip install -r requirements.txt
+python -m pip install --upgrade pip setuptools wheel -q
+pip install --only-binary :all: -r requirements.txt
 IF !ERRORLEVEL! NEQ 0 (
     echo [ERROR] Failed to install dependencies. Check your internet connection.
     pause

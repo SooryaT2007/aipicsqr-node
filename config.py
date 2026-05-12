@@ -40,7 +40,7 @@ class Config:
         self.event_id = self._normalize_env_value(os.getenv('EVENT_ID', ''))
 
         # â”€â”€ API â”€â”€
-        self.api_base_url = os.getenv('API_BASE_URL', 'https://aipicsqr.vercel.app')
+        self.api_base_url = os.getenv('API_BASE_URL', 'https://dashboard.aipicsqr.com')
 
         # â”€â”€ Folder Watching â”€â”€
         scan_paths = os.getenv('SCAN_FOLDERS', '').strip()
