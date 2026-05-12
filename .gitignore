@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment — keep example, ignore actual
+.env
+!.env.example
+
+# AI models (large binaries — downloaded at runtime)
+models/
+
+# Photographer's photo drop folder
+photos/
+
+# Logs and install artefacts
+*.log
+logs/
+install_log.txt
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
