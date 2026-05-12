@@ -1,0 +1,24 @@
+# AIPICSQR Photographer Node - Dependencies
+# Python 3.11+
+
+# Core
+opencv-contrib-python>=4.8.0       # YuNet + SFace face detection/recognition
+# Optional: onnxruntime-openvino>=1.16.0  # enables OpenVINO backend if supported
+numpy>=1.24.0
+Pillow>=10.0.0                     # Image compression
+
+
+# Supabase
+supabase>=2.0.0                    # Supabase Python client
+
+# Folder watching
+watchdog>=3.0.0                    # File system events
+
+# System monitoring
+psutil>=5.9.0                      # CPU/memory/temp monitoring
+
+# Environment
+python-dotenv>=1.0.0               # .env file loading
+
+# Utilities
+requests>=2.31.0                   # HTTP requests
