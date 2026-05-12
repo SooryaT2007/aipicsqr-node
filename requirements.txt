@@ -7,8 +7,8 @@ opencv-contrib-python>=4.8.0,<5.0  # YuNet + SFace; pinned major to avoid ABI br
 numpy>=1.24.0,<3.0
 Pillow>=10.0.0,<12.0               # Image compression
 
-# Supabase — pinned to avoid pulling in a storage3 that requires MSVC (pyiceberg)
-supabase>=2.0.0,<2.10.0
+# Supabase — storage3<2.30.0 avoids pyiceberg (needs MSVC); --only-binary in bat is the safety net
+supabase>=2.5.0
 storage3>=0.7.0,<2.30.0            # 2.30.0 introduced pyiceberg (needs MSVC on Windows)
 
 # Folder watching

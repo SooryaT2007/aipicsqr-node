@@ -1,39 +1,46 @@
 @echo off
 setlocal EnableDelayedExpansion
-title AIPICSQR Photographer Node
+title AIPICSQR - Node Installer
 
 echo ===================================================
-echo        AIPICSQR Photographer Node - Startup
+echo       AIPICSQR Photographer Node - Installer
 echo ===================================================
 echo.
 
-:: 1. Check if Python is installed
+:: 1. Find Python — try 'python' first, fall back to 'py' launcher
+::    (py.exe is installed to Windows\ even when user skips "Add to PATH")
+set PYTHON_CMD=python
 python --version >nul 2>&1
 IF %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Python is not installed or not in your system PATH!
-    echo.
-    echo Please install Python 3.12 from: https://www.python.org/downloads/
-    echo IMPORTANT: Check "Add python.exe to PATH" during installation.
-    echo.
-    pause
-    exit /b 1
+    py --version >nul 2>&1
+    IF !ERRORLEVEL! NEQ 0 (
+        echo [ERROR] Python not found.
+        echo.
+        echo Please install Python 3.12 from:
+        echo   https://www.python.org/downloads/release/python-3120/
+        echo IMPORTANT: During installation, check "Add python.exe to PATH".
+        echo.
+        pause
+        exit /b 1
+    )
+    set PYTHON_CMD=py
 )
 
-:: 1b. Check Python version is within supported range (3.10 - 3.13)
-for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
+:: 2. Check Python version (3.10 - 3.13 supported)
+for /f "tokens=2" %%v in ('!PYTHON_CMD! --version 2^>^&1') do set PYVER=%%v
 for /f "tokens=1,2 delims=." %%a in ("!PYVER!") do (
     set PYMAJOR=%%a
     set PYMINOR=%%b
 )
 IF !PYMAJOR! NEQ 3 (
-    echo [ERROR] Python 3 is required. Found: !PYVER!
-    echo Please install Python 3.12 from: https://www.python.org/downloads/
+    echo [ERROR] Python 3 required. Found: !PYVER!
+    echo Please install Python 3.12: https://www.python.org/downloads/
     pause
     exit /b 1
 )
 IF !PYMINOR! LSS 10 (
-    echo [ERROR] Python 3.10 or newer is required. Found: !PYVER!
-    echo Please install Python 3.12 from: https://www.python.org/downloads/
+    echo [ERROR] Python 3.10 or newer required. Found: !PYVER!
+    echo Please install Python 3.12: https://www.python.org/downloads/
     pause
     exit /b 1
 )
@@ -47,24 +54,18 @@ IF !PYMINOR! GEQ 14 (
     pause
     exit /b 1
 )
-echo [INFO] Python !PYVER! detected. OK.
+echo [INFO] Python !PYVER! OK.
 
-:: 2. Check for .env file
+:: 3. Create .env from template if this is the first run
 IF NOT EXIST ".env" (
-    echo [INFO] First time setup: Creating .env file...
+    echo [INFO] First run: creating .env from template...
     copy .env.example .env >nul
-    echo.
-    echo ==========================================================
-    echo [INFO] A new .env file has been created from the example.
-    echo You can now login through the web app and pair this node.
-    echo The node will use the preconfigured public Supabase settings.
-    echo ==========================================================
 )
 
-:: 3. Setup Virtual Environment
+:: 4. Create virtual environment
 IF NOT EXIST "venv" (
-    echo [INFO] Creating Python virtual environment ^(this might take a minute^)...
-    python -m venv venv
+    echo [INFO] Creating virtual environment...
+    !PYTHON_CMD! -m venv venv
     IF !ERRORLEVEL! NEQ 0 (
         echo [ERROR] Failed to create virtual environment.
         pause
@@ -72,39 +73,44 @@ IF NOT EXIST "venv" (
     )
 )
 
-:: 4. Activate Virtual Environment
-echo [INFO] Activating virtual environment...
-call venv\Scripts\activate.bat
+:: From here we use the venv's Python directly — no PATH dependency needed
+set VENV_PY=venv\Scripts\python.exe
+set VENV_PIP=venv\Scripts\pip.exe
 
-:: 5. Install Dependencies
-echo [INFO] Installing/Updating required packages...
-python -m pip install --upgrade pip setuptools wheel -q
-pip install --only-binary :all: -r requirements.txt
+:: 5. Install / update dependencies
+echo [INFO] Installing packages ^(this may take a few minutes on first run^)...
+%VENV_PY% -m pip install --upgrade pip setuptools wheel -q
+%VENV_PIP% install --only-binary :all: -r requirements.txt
 IF !ERRORLEVEL! NEQ 0 (
-    echo [ERROR] Failed to install dependencies. Check your internet connection.
+    echo.
+    echo [ERROR] Failed to install dependencies.
+    echo.
+    echo If you see a Python version error, install Python 3.12:
+    echo   https://www.python.org/downloads/release/python-3120/
+    echo.
     pause
     exit /b 1
 )
 
-:: 6. Download AI Models
+:: 6. Download AI models
 echo.
-echo [INFO] Checking/Downloading AI Models ^(Face Detection ^& Recognition^)...
-python download_models.py
+echo [INFO] Checking / downloading AI models ^(face detection + recognition^)...
+%VENV_PY% download_models.py
 IF !ERRORLEVEL! NEQ 0 (
-    echo [ERROR] Failed to download AI models.
+    echo [ERROR] Failed to download AI models. Check your internet connection.
     pause
     exit /b 1
 )
 
-:: 7. Run the Node
 echo.
 echo ===================================================
-echo          Starting AIPICSQR Node Server
+echo   Installation complete!
+echo.
+echo   Next steps:
+echo   1. Open .env in a text editor
+echo   2. Set PHOTOGRAPHER_ID  ^(copy from dashboard.aipicsqr.com ^> Nodes^)
+echo   3. Set EVENT_ID         ^(from the Events page in the dashboard^)
+echo   4. Double-click AIPICSQR.bat to start the node
 echo ===================================================
 echo.
-python main.py
-
-:: If main.py crashes or exits, pause so the user can see the error
-echo.
-echo [INFO] Node stopped.
 pause

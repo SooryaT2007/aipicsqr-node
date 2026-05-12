@@ -17,7 +17,6 @@ Usage:
 
 import sys
 import signal
-import time
 import threading
 import logging
 import webbrowser
@@ -36,7 +35,6 @@ from utils.supabase_client import get_supabase_client
 
 LOGIN_URL = 'https://dashboard.aipicsqr.com/auth/login?next=/dashboard/nodes'
 
-# Setup logging
 logger = setup_logger('AIPICSQR-node')
 
 
@@ -89,6 +87,11 @@ def command_listener(config: Config, shutdown_event: threading.Event) -> None:
             logger.info('Unknown command. Type help for available commands.')
 
 
+def wait_for_shutdown(shutdown_event: threading.Event) -> None:
+    while not shutdown_event.is_set():
+        shutdown_event.wait(timeout=1.0)
+
+
 def main():
     """Main entry point for the Photographer Node."""
     logger.info("=" * 60)
@@ -97,7 +100,6 @@ def main():
 
     ensure_env_file()
 
-    # Load configuration
     config = Config()
     if not config.validate():
         logger.error("Invalid configuration. Please check your .env file.")
@@ -107,79 +109,6 @@ def main():
     logger.info(f"Event ID: {config.event_id or '<not configured>'}")
     logger.info(f"Watching folders: {config.scan_folders}")
 
-    if not config.photographer_id:
-        logger.warning("Node is not paired yet. Login through the web dashboard and set PHOTOGRAPHER_ID.")
-        open_login_page()
-        print_commands()
-
-    shutdown_event = threading.Event()
-    command_thread = threading.Thread(
-        target=command_listener,
-        args=(config, shutdown_event),
-        daemon=True,
-    )
-    command_thread.start()
-
-    # Initialize Supabase client
-    supabase = get_supabase_client(config)
-
-    # Initialize resource monitor
-    resource_monitor = ResourceMonitor(
-        max_cpu_percent=config.max_cpu_percent,
-        max_cpu_temp=config.max_cpu_temp,
-        cooldown_period=config.cooldown_period,
-    )
-    resource_monitor.start()
-    logger.info("âœ“ Resource Monitor started")
-
-    # Initialize vision process (runs in separate process)
-    vision_manager = VisionProcessManager(
-        models_dir=config.models_dir,
-        resource_monitor=resource_monitor,
-    )
-    vision_manager.start()
-    logger.info("âœ“ Vision Service started (isolated process)")
-
-    # Initialize photo uploader
-    uploader = PhotoUploader(
-        config=config,
-        supabase=supabase,
-        vision_manager=vision_manager,
-    )
-    logger.info("âœ“ Photo Uploader ready")
-
-    # Initialize folder watcher
-    watcher = FolderWatcher(
-        folders=config.scan_folders,
-        on_new_photo=uploader.process_photo,
-    )
-    watcher.start()
-    logger.info(f"âœ“ Folder Watcher started ({len(config.scan_folders)} folders)")
-
-    # Initialize telemetry (heartbeat)
-    telemetry = TelemetryService(
-        config=config,
-        supabase=supabase,
-        resource_monitor=resource_monitor,
-    )
-    telemetry.start()
-    logger.info("âœ“ Telemetry Service started (60s pulse)")
-
-    # Initialize mesh worker
-    mesh_worker = MeshWorker(
-        config=config,
-        supabase=supabase,
-        vision_manager=vision_manager,
-        resource_monitor=resource_monitor,
-    )
-    mesh_worker.start()
-    logger.info("âœ“ Mesh Worker started")
-
-    logger.info("-" * 60)
-    logger.info("  Node is running. Press Ctrl+C to stop.")
-    logger.info("-" * 60)
-
-    # Handle graceful shutdown
     shutdown_event = threading.Event()
 
     def signal_handler(signum, frame):
@@ -189,9 +118,81 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    command_thread = threading.Thread(
+        target=command_listener,
+        args=(config, shutdown_event),
+        daemon=True,
+    )
+    command_thread.start()
+
+    if not config.photographer_id:
+        logger.warning("Node is not paired. Set PHOTOGRAPHER_ID in .env and restart.")
+        logger.info("Opening login page so you can copy your Photographer ID...")
+        open_login_page()
+        print_commands()
+        wait_for_shutdown(shutdown_event)
+        return
+
     try:
-        while not shutdown_event.is_set():
-            shutdown_event.wait(timeout=1.0)
+        supabase = get_supabase_client(config)
+    except Exception as e:
+        logger.error(f"Failed to connect to Supabase: {e}")
+        logger.error("Check SUPABASE_URL and SUPABASE_ANON_KEY in .env, then restart.")
+        wait_for_shutdown(shutdown_event)
+        return
+
+    resource_monitor = ResourceMonitor(
+        max_cpu_percent=config.max_cpu_percent,
+        max_cpu_temp=config.max_cpu_temp,
+        cooldown_period=config.cooldown_period,
+    )
+    resource_monitor.start()
+    logger.info("OK Resource Monitor started")
+
+    vision_manager = VisionProcessManager(
+        models_dir=config.models_dir,
+        resource_monitor=resource_monitor,
+    )
+    vision_manager.start()
+    logger.info("OK Vision Service started (isolated process)")
+
+    uploader = PhotoUploader(
+        config=config,
+        supabase=supabase,
+        vision_manager=vision_manager,
+    )
+    logger.info("OK Photo Uploader ready")
+
+    watcher = FolderWatcher(
+        folders=config.scan_folders,
+        on_new_photo=uploader.process_photo,
+    )
+    watcher.start()
+    logger.info(f"OK Folder Watcher started ({len(config.scan_folders)} folders)")
+
+    telemetry = TelemetryService(
+        config=config,
+        supabase=supabase,
+        resource_monitor=resource_monitor,
+    )
+    telemetry.start()
+    logger.info("OK Telemetry Service started (60s pulse)")
+
+    mesh_worker = MeshWorker(
+        config=config,
+        supabase=supabase,
+        vision_manager=vision_manager,
+        resource_monitor=resource_monitor,
+    )
+    mesh_worker.start()
+    logger.info("OK Mesh Worker started")
+
+    logger.info("-" * 60)
+    logger.info("  Node is running. Type 'help' for commands. Ctrl+C to stop.")
+    logger.info("-" * 60)
+
+    try:
+        wait_for_shutdown(shutdown_event)
     finally:
         logger.info("Stopping services...")
         watcher.stop()
