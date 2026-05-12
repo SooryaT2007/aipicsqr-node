@@ -1,5 +1,7 @@
 # AIPICSQR Photographer Node - Dependencies
 # Python 3.11+
+# Note: Use --only-binary :all: when installing to avoid building C extensions
+# pip install --only-binary :all: -r requirements.txt
 
 # Core
 opencv-contrib-python>=4.8.0       # YuNet + SFace face detection/recognition
@@ -10,6 +12,8 @@ Pillow>=10.0.0                     # Image compression
 
 # Supabase
 supabase>=2.0.0                    # Supabase Python client
+# Pin pyiceberg to version with Windows prebuilt wheels (dependency of storage3)
+pyiceberg<0.12,>=0.11.0            # Use prebuilt wheels, avoid C++ build requirement
 
 # Folder watching
 watchdog>=3.0.0                    # File system events
