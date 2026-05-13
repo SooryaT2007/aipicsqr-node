@@ -186,24 +186,37 @@ class MeshWorker:
 
             selfie_b64 = job.get('selfie_base64', '')
             if not selfie_b64:
+                logger.error(f'  Mesh: selfie {job_id[:8]} — no selfie_base64 in job payload')
                 self.api.fail_selfie_job(job_id, 'No selfie data')
                 return
 
+            logger.info(f'  Mesh: selfie {job_id[:8]} — raw b64 length={len(selfie_b64):,} chars')
+
             # Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
             if ',' in selfie_b64:
-                selfie_b64 = selfie_b64.split(',', 1)[1]
+                prefix, selfie_b64 = selfie_b64.split(',', 1)
+                logger.info(f'  Mesh: stripped data URI prefix: {prefix[:40]}')
 
-            image_bytes = base64.b64decode(selfie_b64)
+            try:
+                image_bytes = base64.b64decode(selfie_b64)
+                logger.info(f'  Mesh: selfie {job_id[:8]} — decoded to {len(image_bytes):,} bytes')
+            except Exception as decode_err:
+                logger.error(f'  Mesh: selfie {job_id[:8]} — base64 decode failed: {decode_err}')
+                self.api.fail_selfie_job(job_id, f'base64 decode error: {decode_err}')
+                return
+
             embedding = self.vision_manager.process_selfie(image_bytes, timeout=15.0)
 
             if not embedding:
+                logger.warning(f'  Mesh: selfie {job_id[:8]} — vision returned no embedding (no face detected)')
                 self.api.fail_selfie_job(job_id, 'No face detected in selfie')
                 return
 
+            logger.info(f'  Mesh: selfie {job_id[:8]} — embedding dim={len(embedding)}, posting to server')
             self.api.complete_selfie_job(job_id, embedding)
             self._record_job_done()
-            logger.info(f'  Mesh: selfie {job_id[:8]} done')
+            logger.info(f'  Mesh: selfie {job_id[:8]} done ✅')
 
         except Exception as e:
-            logger.error(f'  Mesh: selfie {job_id[:8]} failed: {e}')
+            logger.error(f'  Mesh: selfie {job_id[:8]} failed: {e}', exc_info=True)
             self.api.fail_selfie_job(job_id, str(e))

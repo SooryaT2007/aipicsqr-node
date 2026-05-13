@@ -138,10 +138,11 @@ class VisionService:
         # Read image
         original = cv2.imread(image_path)
         if original is None:
-            logger.error(f"Could not read image: {image_path}")
+            logger.error(f"  [photo] Could not read image: {image_path}")
             return []
 
         orig_h, orig_w = original.shape[:2]
+        logger.info(f"  [photo] {Path(image_path).name}: {orig_w}x{orig_h} px")
 
         # â”€â”€ STEP 1: Resize for detection (YuNet expects smaller input) â”€â”€
         detect_w = 640
@@ -155,8 +156,16 @@ class VisionService:
         # â”€â”€ STEP 2: Detect faces â”€â”€
         _, faces = self._detector.detect(resized)
 
-        if faces is None or len(faces) == 0:
-            logger.debug(f"  No faces detected in {Path(image_path).name}")
+        if faces is None:
+            logger.warning(f"  [photo] detector returned None for {Path(image_path).name}")
+            return []
+
+        logger.info(f"  [photo] Raw candidates: {len(faces)}, conf_threshold={confidence_threshold}")
+        for i, f in enumerate(faces):
+            logger.info(f"    candidate[{i}] conf={f[-1]:.3f} w={int(f[2])} h={int(f[3])}")
+
+        if len(faces) == 0:
+            logger.info(f"  [photo] No candidates from detector for {Path(image_path).name}")
             return []
 
         results = []
@@ -164,6 +173,7 @@ class VisionService:
         for face in faces:
             face_confidence = float(face[-1])
             if face_confidence < confidence_threshold:
+                logger.debug(f"    Skipping face conf={face_confidence:.3f} < threshold={confidence_threshold}")
                 continue
 
             # â”€â”€ STEP 3: Scale bounding box back to original resolution â”€â”€
@@ -239,37 +249,54 @@ class VisionService:
             if not self.initialize():
                 return None
 
+        logger.info(f'  [selfie] Received {len(image_data):,} bytes')
+
         # Decode image from bytes
         nparr = np.frombuffer(image_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
-            logger.error('Could not decode selfie image bytes')
+            logger.error('  [selfie] ❌ cv2.imdecode failed — bytes may be corrupt or not a valid image')
             return None
 
         h, w = img.shape[:2]
+        logger.info(f'  [selfie] Decoded image: {w}×{h} px, channels={img.shape[2] if img.ndim == 3 else 1}')
 
         # Resize to 640px wide — same as process_image; YuNet anchors are tuned for this scale
         detect_w = 640
         scale = detect_w / w
         detect_h = int(h * scale)
         img_detect = cv2.resize(img, (detect_w, detect_h))
+        logger.info(f'  [selfie] Resized to {detect_w}×{detect_h} for YuNet (scale={scale:.3f})')
 
         self._detector.setInputSize((detect_w, detect_h))
         _, faces = self._detector.detect(img_detect)
 
-        if faces is None or len(faces) == 0:
-            logger.warning('No face detected in selfie')
+        if faces is None:
+            logger.warning('  [selfie] ❌ detector.detect() returned None — possible model error')
+            return None
+
+        logger.info(f'  [selfie] Raw detections: {len(faces)} candidate(s)')
+        for i, f in enumerate(faces):
+            logger.info(f'    face[{i}] bbox=({int(f[0])},{int(f[1])},{int(f[2])},{int(f[3])}) conf={f[-1]:.3f}')
+
+        if len(faces) == 0:
+            logger.warning('  [selfie] ❌ No faces detected — check lighting, framing, and selfie resolution')
             return None
 
         # Take the largest face (most likely the selfie subject)
         largest_face = max(faces, key=lambda f: f[2] * f[3])
+        lf = largest_face
+        logger.info(f'  [selfie] Selected largest face: bbox=({int(lf[0])},{int(lf[1])},{int(lf[2])},{int(lf[3])}) conf={lf[-1]:.3f}')
 
         try:
             # Align and embed from the resized image (no need to scale back for selfies)
             aligned = self._recognizer.alignCrop(img_detect, largest_face)
+            logger.info(f'  [selfie] alignCrop OK — aligned shape={aligned.shape}')
             embedding = self._recognizer.feature(aligned)
-            return embedding.flatten().tolist()
+            emb_list = embedding.flatten().tolist()
+            logger.info(f'  [selfie] ✅ Embedding extracted: dim={len(emb_list)}, norm={float(np.linalg.norm(embedding)):.4f}')
+            return emb_list
         except Exception as e:
-            logger.error(f'Selfie processing error: {e}')
+            logger.error(f'  [selfie] ❌ alignCrop/feature failed: {e}')
             return None
