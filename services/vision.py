@@ -212,8 +212,8 @@ class VisionService:
                 logger.debug(f"  Failed to extract features: {e}")
                 continue
 
-            if len(embedding) != 512:
-                logger.warning(f"  Unexpected embedding dimension: {len(embedding)}")
+            if len(embedding) < 64:
+                logger.warning(f"  Embedding too small ({len(embedding)}-dim), skipping")
                 continue
 
             results.append({
