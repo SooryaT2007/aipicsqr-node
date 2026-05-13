@@ -94,11 +94,101 @@ def folder_poll_loop(api: APIClient, watcher: FolderWatcher, shutdown_event: thr
 
 # ── CLI command listener ──────────────────────────────────────────────────────
 
+def pick_folder_dialog() -> str:
+    """Open a native OS folder picker. Returns chosen path or '' if cancelled."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', True)
+        path = filedialog.askdirectory(title='Select folder to watch')
+        root.destroy()
+        return path or ''
+    except Exception as e:
+        logger.error(f'Folder picker unavailable: {e}')
+        return ''
+
+
+def cmd_addfolder(api):
+    """Interactive addfolder command — opens native picker, registers via API."""
+    # 1. Native folder picker
+    print()
+    print('  Opening folder picker...')
+    path = pick_folder_dialog()
+    if not path:
+        print('  Cancelled.')
+        return
+
+    print(f'  Selected: {path}')
+
+    # 2. Fetch active events
+    try:
+        events = api.get_events()
+    except Exception as e:
+        logger.error(f'  Could not fetch events: {e}')
+        return
+
+    if not events:
+        print('  No active events found. Create an event in the dashboard first.')
+        return
+
+    # 3. Pick event (auto-select if only one)
+    if len(events) == 1:
+        event = events[0]
+        print(f'  Event: {event["name"]}')
+    else:
+        print()
+        print('  Active events:')
+        for i, ev in enumerate(events, 1):
+            date = ev.get('event_date', '')
+            print(f'    {i}. {ev["name"]}{f"  ({date})" if date else ""}')
+        while True:
+            choice = input(f'  Select event (1-{len(events)}): ').strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(events):
+                event = events[int(choice) - 1]
+                break
+            print('  Invalid choice.')
+
+    # 4. Pool type
+    print()
+    print('  Pool type:')
+    print('    1. Public        — no face scan (venue, group shots)')
+    print('    2. Private Free  — face scan, free download after review')
+    print('    3. Private Premium — face scan, paid download (coming soon)')
+    pool_map = {'1': 'public', '2': 'private_free', '3': 'private_premium'}
+    while True:
+        choice = input('  Select pool (1-3, default 1): ').strip() or '1'
+        if choice in pool_map:
+            pool_type = pool_map[choice]
+            break
+        print('  Invalid choice.')
+
+    # 5. Watch duration
+    print()
+    watch_input = input('  Watch duration in hours (default 24): ').strip() or '24'
+    try:
+        watch_hours = int(watch_input)
+    except ValueError:
+        watch_hours = 24
+
+    # 6. Register via API
+    try:
+        result = api.add_folder(event['id'], path, pool_type, watch_hours)
+        folder = result.get('folder', {})
+        print()
+        print(f'  Done! Watching: {folder.get("path", path)}')
+        print(f'  Pool: {folder.get("pool_type", pool_type)}  |  Until: {folder.get("watch_until", "")}')
+        print('  The node will pick up this folder on the next sync (within 30 s).')
+    except Exception as e:
+        logger.error(f'  Failed to add folder: {e}')
+
+
 def print_commands():
-    logger.info('Commands: status | login | logout | help')
+    logger.info('Commands: status | addfolder | login | logout | help')
 
 
-def command_listener(config: Config, shutdown_event: threading.Event):
+def command_listener(config: Config, api, shutdown_event: threading.Event):
     while not shutdown_event.is_set():
         try:
             raw = sys.stdin.readline()
@@ -115,6 +205,9 @@ def command_listener(config: Config, shutdown_event: threading.Event):
         if verb == 'status':
             logger.info(f'Photographer ID : {config.photographer_id or "<not set>"}')
             logger.info(f'Node ID         : {config.node_id or "<not set>"}')
+
+        elif verb == 'addfolder':
+            cmd_addfolder(api)
 
         elif verb == 'login':
             webbrowser.open(DASHBOARD_URL)
@@ -170,7 +263,7 @@ def main():
 
     threading.Thread(
         target=command_listener,
-        args=(config, shutdown_event),
+        args=(config, api, shutdown_event),
         daemon=True,
     ).start()
 
@@ -226,7 +319,7 @@ def main():
 
     logger.info('-' * 60)
     logger.info("  Node running. Go to your dashboard to add watch folders.")
-    logger.info("  Type 'help' for commands. Ctrl+C to stop.")
+    logger.info("  Type 'addfolder' to pick a folder. Ctrl+C to stop.")
     logger.info('-' * 60)
 
     try:

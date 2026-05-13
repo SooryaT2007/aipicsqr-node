@@ -71,6 +71,33 @@ class APIClient:
 
     # ── Folder polling ────────────────────────────────────────────────────────
 
+    def get_events(self) -> list:
+        """Returns active events for this photographer — used by addfolder command."""
+        resp = self._session.post(
+            f'{self._config.api_base_url}/api/node/events',
+            json=self._auth(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get('events', [])
+
+    def add_folder(self, event_id: str, path: str, pool_type: str, watch_hours: int) -> dict:
+        """Register a new watch folder via the node addfolder command."""
+        payload = {
+            **self._auth(),
+            'event_id': event_id,
+            'path': path,
+            'pool_type': pool_type,
+            'watch_hours': watch_hours,
+        }
+        resp = self._session.post(
+            f'{self._config.api_base_url}/api/node/folders/add',
+            json=payload,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def get_folders(self) -> list:
         """
         Fetch all active watch folders for this photographer's events.
