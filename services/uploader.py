@@ -70,6 +70,12 @@ class PhotoUploader:
             # STEP 2: Get presigned URL (tiny JSON — no file bytes through Vercel)
             logger.info(f'  Requesting upload URL...')
             presign = self.api.get_upload_url(path.name, event_id=event_id, folder_id=folder_id)
+
+            # Server detected this file was already uploaded in a previous session
+            if presign.get('already_uploaded'):
+                logger.info(f'  Skipping {path.name} — already uploaded (dedup)')
+                return
+
             upload_url = presign['upload_url']
             photo_id = presign['photo_id']
 
