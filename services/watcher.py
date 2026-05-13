@@ -1,116 +1,161 @@
 """
 Folder Watcher Service
 ======================
-Watches designated folders for new image files and triggers
-the upload pipeline when new photos are detected.
+Watches folders for new image files and triggers the upload pipeline.
 
-Uses watchdog for efficient filesystem monitoring with debouncing
-to handle rapid file writes (e.g., camera tethering via FTP).
+Folders are managed dynamically: the main loop calls sync_folders() every
+30 s with the current list from the API, adding/removing watchers as needed.
+
+Each folder entry carries: {id, event_id, path, pool_type, watch_until}
+The pool_type is forwarded to the uploader so it can decide whether to run
+face recognition (public pool skips it).
 """
 
 import time
 import logging
 import threading
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 
 logger = logging.getLogger('AIPICSQR-node')
 
-# Supported image extensions
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw'}
-
-# Debounce period (seconds) - wait for file to finish writing
+IMAGE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.tiff', '.tif',
+    '.bmp', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw',
+}
 DEBOUNCE_SECONDS = 2.0
 
 
 class PhotoHandler(FileSystemEventHandler):
     """Handles new photo file events with debouncing."""
 
-    def __init__(self, on_new_photo: Callable[[str], None]):
+    def __init__(self, on_new_file: Callable[[str], None]):
         super().__init__()
-        self.on_new_photo = on_new_photo
+        self._on_new_file = on_new_file
         self._pending: dict[str, float] = {}
         self._lock = threading.Lock()
         self._debounce_thread = threading.Thread(target=self._debounce_loop, daemon=True)
         self._debounce_thread.start()
 
     def on_created(self, event: FileCreatedEvent):
-        """Called when a new file is created in the watched folder."""
         if event.is_directory:
             return
-
         file_path = Path(event.src_path)
         if file_path.suffix.lower() not in IMAGE_EXTENSIONS:
             return
-
-        # Add to pending with timestamp for debouncing
         with self._lock:
             self._pending[str(file_path)] = time.time()
-            logger.debug(f"New file detected: {file_path.name}")
+            logger.debug(f'New file detected: {file_path.name}')
 
     def _debounce_loop(self):
-        """Process files after debounce period to ensure they're fully written."""
         while True:
             time.sleep(0.5)
             now = time.time()
             ready = []
-
             with self._lock:
                 for path, timestamp in list(self._pending.items()):
                     if now - timestamp >= DEBOUNCE_SECONDS:
                         ready.append(path)
-
                 for path in ready:
                     del self._pending[path]
-
             for path in ready:
                 try:
-                    # Verify file still exists and has non-zero size
                     p = Path(path)
                     if p.exists() and p.stat().st_size > 0:
-                        logger.info(f"ðŸ“¸ Processing: {p.name}")
-                        self.on_new_photo(path)
+                        logger.info(f'📸 Processing: {p.name}')
+                        self._on_new_file(path)
                     else:
-                        logger.warning(f"File disappeared or empty: {p.name}")
+                        logger.warning(f'File disappeared or empty: {p.name}')
                 except Exception as e:
-                    logger.error(f"Error processing {path}: {e}")
+                    logger.error(f'Error processing {path}: {e}')
 
 
 class FolderWatcher:
     """
-    Watches multiple folders for new image files.
-    
+    Dynamically watches folders for new image files.
+
     Usage:
-        watcher = FolderWatcher(
-            folders=['/path/to/photos'],
-            on_new_photo=my_callback
-        )
-        watcher.start()
+        watcher = FolderWatcher(on_new_photo=uploader.process_photo)
+        watcher.start()                          # starts the observer thread
+        watcher.sync_folders(folders_from_api)  # call every 30 s
+        watcher.stop()
     """
 
-    def __init__(self, folders: List[str], on_new_photo: Callable[[str], None]):
-        self.folders = folders
-        self.on_new_photo = on_new_photo
+    def __init__(self, on_new_photo: Callable[[str, dict], None]):
+        # on_new_photo(file_path: str, folder_info: dict) -> None
+        self._on_new_photo = on_new_photo
+        self._folder_info: dict[str, dict] = {}   # path -> folder entry dict
+        self._watches: dict[str, object] = {}     # path -> watchdog Watch
         self._observer = Observer()
-        self._handler = PhotoHandler(on_new_photo)
+        self._handler = PhotoHandler(self._dispatch)
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self):
-        """Start watching all configured folders."""
-        for folder in self.folders:
-            folder_path = Path(folder)
-            if not folder_path.exists():
-                logger.warning(f"Watch folder does not exist, creating: {folder}")
-                folder_path.mkdir(parents=True, exist_ok=True)
-
-            self._observer.schedule(self._handler, str(folder_path), recursive=True)
-            logger.info(f"  ðŸ‘ï¸ Watching: {folder}")
-
         self._observer.start()
+        logger.info('Folder Watcher ready (waiting for folders from API)')
 
     def stop(self):
-        """Stop the folder watcher."""
         self._observer.stop()
         self._observer.join(timeout=5)
-        logger.info("Folder Watcher stopped")
+        logger.info('Folder Watcher stopped')
+
+    # ── Dynamic sync ──────────────────────────────────────────────────────────
+
+    def sync_folders(self, active_folders: list[dict]):
+        """
+        Called every 30 s with the current folder list from the API.
+        Adds any new paths and removes any that are no longer active.
+        """
+        active_paths = {f['path'] for f in active_folders}
+        current_paths = set(self._folder_info.keys())
+
+        for folder in active_folders:
+            if folder['path'] not in current_paths:
+                self._add_folder(folder)
+
+        for path in current_paths - active_paths:
+            self._remove_folder(path)
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _add_folder(self, folder_info: dict):
+        path = folder_info['path']
+        folder_path = Path(path)
+        if not folder_path.exists():
+            try:
+                folder_path.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.warning(f'Cannot create folder {path}: {e}')
+                return
+
+        watch = self._observer.schedule(self._handler, str(folder_path), recursive=True)
+        self._watches[path] = watch
+        self._folder_info[path] = folder_info
+        logger.info(f'  👁 Watching [{folder_info["pool_type"]}]: {path}')
+
+    def _remove_folder(self, path: str):
+        watch = self._watches.pop(path, None)
+        if watch:
+            try:
+                self._observer.unschedule(watch)
+            except Exception:
+                pass
+        self._folder_info.pop(path, None)
+        logger.info(f'  ✋ Stopped watching: {path}')
+
+    def _dispatch(self, file_path: str):
+        """Find which tracked folder owns this file and call the callback."""
+        p = Path(file_path).resolve()
+        for folder_path_str, info in self._folder_info.items():
+            try:
+                p.relative_to(Path(folder_path_str).resolve())
+                self._on_new_photo(file_path, info)
+                return
+            except ValueError:
+                continue
+        # Fallback: unknown folder — still call with empty info
+        logger.warning(f'File {p.name} not matched to any tracked folder')
+        self._on_new_photo(file_path, {})

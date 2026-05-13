@@ -63,9 +63,25 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ── Folder polling ────────────────────────────────────────────────────────
+
+    def get_folders(self) -> list:
+        """
+        Fetch all active watch folders for this photographer's events.
+        Each entry: {id, event_id, path, pool_type, watch_until}
+        Called every 30 s; node dynamically adjusts which paths it watches.
+        """
+        resp = self._session.post(
+            f'{self._config.api_base_url}/api/node/folders',
+            json=self._auth(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get('folders', [])
+
     # ── Upload ────────────────────────────────────────────────────────────────
 
-    def get_upload_url(self, filename: str) -> dict:
+    def get_upload_url(self, filename: str, event_id: str, folder_id: str | None = None) -> dict:
         """
         Request a presigned R2 URL. Returns {'upload_url': str, 'photo_id': str}.
         The node then PUTs the photo bytes directly to upload_url — no file bytes
@@ -73,10 +89,12 @@ class APIClient:
         """
         payload = {
             **self._auth(),
-            'event_id': self._config.event_id,
+            'event_id': event_id,
             'filename': filename,
             'content_type': 'image/jpeg',
         }
+        if folder_id:
+            payload['folder_id'] = folder_id
         resp = self._session.post(
             f'{self._config.api_base_url}/api/upload/presign',
             json=payload,
