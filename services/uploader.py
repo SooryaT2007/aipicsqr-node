@@ -13,11 +13,23 @@ folder_info dict: {id, event_id, path, pool_type, watch_until}
 """
 
 import logging
+import time
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from services.compressor import compress_image
+
+# Shared session for R2 PUT with retry on transient errors
+_r2_session = requests.Session()
+_r2_session.mount('https://', HTTPAdapter(max_retries=Retry(
+    total=3, backoff_factor=1.5,
+    status_forcelist={429, 500, 502, 503, 504},
+    allowed_methods=frozenset({'PUT'}),
+    raise_on_status=False,
+)))
 
 logger = logging.getLogger('AIPICSQR-node')
 
@@ -62,7 +74,7 @@ class PhotoUploader:
 
             # STEP 3: PUT directly to R2
             logger.info(f'  Uploading to R2...')
-            put_resp = requests.put(
+            put_resp = _r2_session.put(
                 upload_url,
                 data=compressed_bytes,
                 headers={'Content-Type': 'image/jpeg'},

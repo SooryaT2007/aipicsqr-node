@@ -19,6 +19,7 @@ from typing import Callable
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 
+
 logger = logging.getLogger('AIPICSQR-node')
 
 IMAGE_EXTENSIONS = {
@@ -189,6 +190,7 @@ class FolderWatcher:
         logger.info(f'  Initial scan: {len(files)} existing photo(s) in {Path(path).name}')
 
         def _run():
+            failed = []
             for f in files:
                 fp = str(f.resolve())
                 if fp in self._processed_paths:
@@ -197,6 +199,17 @@ class FolderWatcher:
                 try:
                     self._on_new_photo(str(f), folder_info)
                 except Exception as e:
-                    logger.error(f'  Scan error for {f.name}: {e}')
+                    logger.warning(f'  Scan failed for {f.name}: {e}')
+                    failed.append(f)
+
+            # Retry failed photos once after a short wait (handles startup DNS lag)
+            if failed:
+                logger.info(f'  Retrying {len(failed)} failed photo(s) in 15 s...')
+                time.sleep(15)
+                for f in failed:
+                    try:
+                        self._on_new_photo(str(f), folder_info)
+                    except Exception as e:
+                        logger.error(f'  Retry failed for {f.name}: {e}')
 
         threading.Thread(target=_run, daemon=True).start()

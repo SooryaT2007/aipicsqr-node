@@ -5,10 +5,17 @@ Authentication is a node_token issued on registration (stored in node_config.jso
 """
 
 import socket
+import time
 import logging
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger('AIPICSQR-node')
+
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_MAX_RETRIES    = 3
+_BACKOFF_FACTOR = 1.5   # sleeps: 0 s, 1.5 s, 3 s
 
 
 class APIClient:
@@ -16,6 +23,39 @@ class APIClient:
         self._config = config
         self._session = requests.Session()
         self._session.headers.update({'Content-Type': 'application/json'})
+
+        # Retry on HTTP 5xx / rate-limit responses automatically
+        _adapter = HTTPAdapter(max_retries=Retry(
+            total=_MAX_RETRIES,
+            backoff_factor=_BACKOFF_FACTOR,
+            status_forcelist=_RETRY_STATUSES,
+            allowed_methods=frozenset({'GET', 'POST', 'PUT'}),
+            raise_on_status=False,
+        ))
+        self._session.mount('https://', _adapter)
+        self._session.mount('http://',  _adapter)
+
+    # ── Internal: retry on DNS / connection errors ────────────────────────────
+
+    def _post(self, url: str, **kwargs) -> requests.Response:
+        return self._req('POST', url, **kwargs)
+
+    def _put(self, url: str, **kwargs) -> requests.Response:
+        return self._req('PUT', url, **kwargs)
+
+    def _req(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Wraps session.request with retries on transient connection errors."""
+        last_exc: Exception = RuntimeError('no attempts made')
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return self._session.request(method, url, **kwargs)
+            except requests.exceptions.ConnectionError as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _BACKOFF_FACTOR * (2 ** attempt)
+                    logger.debug(f'Network error (attempt {attempt + 1}), retrying in {wait:.0f}s: {exc}')
+                    time.sleep(wait)
+        raise last_exc
 
     # ── Auth header ───────────────────────────────────────────────────────────
 
@@ -34,7 +74,7 @@ class APIClient:
             'hostname': socket.gethostname(),
             'ip_address': self._local_ip(),
         }
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/register',
             json=payload,
             timeout=15,
@@ -61,7 +101,7 @@ class APIClient:
             'cpu_threads':      resource_status.get('cpu_threads'),
             'cpu_freq_mhz':     resource_status.get('cpu_freq_mhz'),
         }
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/nodes/pulse',
             json=payload,
             timeout=10,
@@ -73,7 +113,7 @@ class APIClient:
 
     def get_events(self) -> list:
         """Returns active events for this photographer — used by addfolder command."""
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/events',
             json=self._auth(),
             timeout=10,
@@ -90,7 +130,7 @@ class APIClient:
             'pool_type': pool_type,
             'watch_hours': watch_hours,
         }
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/folders/add',
             json=payload,
             timeout=10,
@@ -104,7 +144,7 @@ class APIClient:
         Each entry: {id, event_id, path, pool_type, watch_until}
         Called every 30 s; node dynamically adjusts which paths it watches.
         """
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/folders',
             json=self._auth(),
             timeout=10,
@@ -128,7 +168,7 @@ class APIClient:
         }
         if folder_id:
             payload['folder_id'] = folder_id
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/upload/presign',
             json=payload,
             timeout=15,
@@ -168,7 +208,7 @@ class APIClient:
             'face_vectors':    face_vectors,
             'delegated':       delegated,
         }
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/upload/complete',
             json=payload,
             timeout=15,
@@ -179,7 +219,7 @@ class APIClient:
     # ── Mesh jobs ─────────────────────────────────────────────────────────────
 
     def get_jobs(self) -> list:
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs',
             json=self._auth(),
             timeout=10,
@@ -188,7 +228,7 @@ class APIClient:
         return resp.json().get('jobs', [])
 
     def claim_job(self, job_id: str) -> dict:
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs/{job_id}/claim',
             json=self._auth(),
             timeout=10,
@@ -210,7 +250,7 @@ class APIClient:
             'photo_id': photo_id,
             'face_vectors': face_vectors,
         }
-        resp = self._session.post(
+        resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs/{job_id}/complete',
             json=payload,
             timeout=15,
@@ -220,7 +260,7 @@ class APIClient:
 
     def fail_job(self, job_id: str, error: str) -> None:
         try:
-            self._session.post(
+            self._post(
                 f'{self._config.api_base_url}/api/node/jobs/{job_id}/fail',
                 json={**self._auth(), 'error': error},
                 timeout=10,
