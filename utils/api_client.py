@@ -47,13 +47,19 @@ class APIClient:
     def pulse(self, resource_status: dict) -> dict:
         payload = {
             **self._auth(),
-            'node_id': self._config.node_id,
+            'node_id':        self._config.node_id,
             'photographer_id': self._config.photographer_id,
-            'hostname': socket.gethostname(),
-            'ip_address': self._local_ip(),
-            'cpu_percent': resource_status.get('cpu_percent', 0),
-            'cpu_temp': resource_status.get('cpu_temp', 0),
-            'status': 'busy' if resource_status.get('paused') else 'online',
+            'hostname':       socket.gethostname(),
+            'ip_address':     self._local_ip(),
+            'cpu_percent':    resource_status.get('cpu_percent', 0),
+            'cpu_temp':       resource_status.get('cpu_temp', 0),
+            'status':         'busy' if resource_status.get('paused') else 'online',
+            # Extended hardware specs
+            'total_ram_mb':     resource_status.get('total_ram_mb'),
+            'available_ram_mb': resource_status.get('available_ram_mb'),
+            'cpu_cores':        resource_status.get('cpu_cores'),
+            'cpu_threads':      resource_status.get('cpu_threads'),
+            'cpu_freq_mhz':     resource_status.get('cpu_freq_mhz'),
         }
         resp = self._session.post(
             f'{self._config.api_base_url}/api/nodes/pulse',
@@ -110,10 +116,13 @@ class APIClient:
         width: int,
         height: int,
         face_results: list,
+        delegated: bool = False,
     ) -> dict:
         """
-        Notify the server that the photo has been uploaded and vectorized.
-        Face vectors are sent here; the server writes them to Supabase.
+        Notify the server that the photo has been uploaded.
+        If delegated=True, the server creates a vectoring_job for mesh processing
+        instead of marking the photo as vectorized.
+        Face vectors are only sent when delegated=False.
         """
         face_vectors = [
             {
@@ -125,11 +134,12 @@ class APIClient:
         ]
         payload = {
             **self._auth(),
-            'photo_id': photo_id,
+            'photo_id':        photo_id,
             'file_size_bytes': file_size,
-            'width': width,
-            'height': height,
-            'face_vectors': face_vectors,
+            'width':           width,
+            'height':          height,
+            'face_vectors':    face_vectors,
+            'delegated':       delegated,
         }
         resp = self._session.post(
             f'{self._config.api_base_url}/api/node/upload/complete',

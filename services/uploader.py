@@ -79,8 +79,8 @@ class PhotoUploader:
                 return
 
             if self.vision_manager.should_delegate():
-                logger.info(f'  Resource limit — queuing {path.name} for mesh processing')
-                self.api.upload_complete(photo_id, file_size, width, height, [])
+                logger.info(f'  Resource limit — delegating {path.name} to mesh')
+                self.api.upload_complete(photo_id, file_size, width, height, [], delegated=True)
                 return
 
             logger.info(f'  Running face detection...')

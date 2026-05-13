@@ -150,9 +150,34 @@ class ResourceMonitor:
         return self._cpu_temp
 
     def get_status(self) -> dict:
-        """Get current resource status for telemetry."""
+        """Current runtime status for telemetry — includes live + static specs."""
         return {
             'cpu_percent': int(self._cpu_percent),
-            'cpu_temp': round(self._cpu_temp, 1),
-            'paused': self._paused,
+            'cpu_temp':    round(self._cpu_temp, 1),
+            'paused':      self._paused,
+            **self._get_system_specs(),
         }
+
+    def _get_system_specs(self) -> dict:
+        """
+        Collect system hardware specs via psutil.
+
+        RAM values change each pulse (usage fluctuates).
+        Core count and frequency are stable but cheap to re-read.
+        Returns an empty dict if psutil is unavailable.
+        """
+        if psutil is None:
+            return {}
+        try:
+            mem  = psutil.virtual_memory()
+            freq = psutil.cpu_freq()
+            return {
+                'total_ram_mb':     mem.total    // (1024 * 1024),
+                'available_ram_mb': mem.available // (1024 * 1024),
+                'cpu_cores':        psutil.cpu_count(logical=False) or 1,
+                'cpu_threads':      psutil.cpu_count(logical=True)  or 1,
+                'cpu_freq_mhz':     int(freq.current) if freq else 0,
+            }
+        except Exception as e:
+            logger.debug(f'System specs collection failed: {e}')
+            return {}
