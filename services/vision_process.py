@@ -154,6 +154,17 @@ class VisionProcessManager:
         """Check if the vision process is ready to accept tasks."""
         return self._ready and self._process is not None and self._process.is_alive()
 
+    def _ensure_alive(self):
+        """Restart the vision subprocess if it crashed unexpectedly."""
+        if (
+            self._process is not None
+            and self._ready
+            and not self._process.is_alive()
+        ):
+            logger.warning('Vision process crashed — restarting...')
+            self._ready = False
+            self.start()
+
     def should_delegate(self) -> bool:
         """
         Check if processing should be delegated to mesh network
@@ -166,15 +177,16 @@ class VisionProcessManager:
     def process_image(self, image_path: str, confidence_threshold: float = 0.7, timeout: float = 30.0) -> List[dict]:
         """
         Send an image to the vision process for face detection + recognition.
-        
+
         Args:
             image_path: Path to the image file
             confidence_threshold: Minimum face detection confidence
             timeout: Maximum time to wait for results
-        
+
         Returns:
             List of face results with embeddings
         """
+        self._ensure_alive()
         if not self.is_ready():
             logger.warning("Vision process not ready")
             return []
@@ -213,14 +225,15 @@ class VisionProcessManager:
     def process_selfie(self, image_data: bytes, timeout: float = 10.0) -> Optional[List[float]]:
         """
         Process a selfie and return the 512-dim embedding.
-        
+
         Args:
             image_data: Raw image bytes
             timeout: Maximum wait time
-        
+
         Returns:
             512-dim embedding list or None
         """
+        self._ensure_alive()
         if not self.is_ready():
             return None
 
