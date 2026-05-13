@@ -88,6 +88,7 @@ class FolderWatcher:
         self._on_new_photo = on_new_photo
         self._folder_info: dict[str, dict] = {}   # path -> folder entry dict
         self._watches: dict[str, object] = {}     # path -> watchdog Watch
+        self._processed_paths: set[str] = set()   # dedup within a session
         self._observer = Observer()
         self._handler = PhotoHandler(self._dispatch)
 
@@ -136,6 +137,9 @@ class FolderWatcher:
         self._folder_info[path] = folder_info
         logger.info(f'  👁 Watching [{folder_info["pool_type"]}]: {path}')
 
+        # Process any photos already in the folder
+        self._scan_existing(folder_info)
+
     def _remove_folder(self, path: str):
         watch = self._watches.pop(path, None)
         if watch:
@@ -149,13 +153,50 @@ class FolderWatcher:
     def _dispatch(self, file_path: str):
         """Find which tracked folder owns this file and call the callback."""
         p = Path(file_path).resolve()
+        fp = str(p)
+        if fp in self._processed_paths:
+            return  # already picked up by initial scan
         for folder_path_str, info in self._folder_info.items():
             try:
                 p.relative_to(Path(folder_path_str).resolve())
+                self._processed_paths.add(fp)
                 self._on_new_photo(file_path, info)
                 return
             except ValueError:
                 continue
-        # Fallback: unknown folder — still call with empty info
         logger.warning(f'File {p.name} not matched to any tracked folder')
         self._on_new_photo(file_path, {})
+
+    def _scan_existing(self, folder_info: dict):
+        """
+        Process images already in the folder when it is first added.
+        Runs in a single background thread (sequential) to avoid hammering
+        the upload pipeline with hundreds of concurrent threads.
+        """
+        path = folder_info['path']
+        try:
+            files = [
+                f for f in Path(path).rglob('*')
+                if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+            ]
+        except Exception as e:
+            logger.warning(f'Initial scan error for {path}: {e}')
+            return
+
+        if not files:
+            return
+
+        logger.info(f'  Initial scan: {len(files)} existing photo(s) in {Path(path).name}')
+
+        def _run():
+            for f in files:
+                fp = str(f.resolve())
+                if fp in self._processed_paths:
+                    continue
+                self._processed_paths.add(fp)
+                try:
+                    self._on_new_photo(str(f), folder_info)
+                except Exception as e:
+                    logger.error(f'  Scan error for {f.name}: {e}')
+
+        threading.Thread(target=_run, daemon=True).start()
