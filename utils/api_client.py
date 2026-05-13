@@ -278,7 +278,7 @@ class APIClient:
         return resp.json()
 
     def complete_selfie_job(self, job_id: str, embedding: list) -> dict:
-        """Send the 512-dim selfie embedding; server runs pgvector match and stores results."""
+        """Send the 128-dim selfie embedding; server runs pgvector match and stores results."""
         payload = {**self._auth(), 'embedding': embedding}
         resp = self._post(
             f'{self._config.api_base_url}/api/node/selfie-jobs/{job_id}/complete',
