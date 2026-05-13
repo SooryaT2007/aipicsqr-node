@@ -56,13 +56,7 @@ IF !PYMINOR! GEQ 14 (
 )
 echo [INFO] Python !PYVER! OK.
 
-:: 3. Create .env from template if this is the first run
-IF NOT EXIST ".env" (
-    echo [INFO] First run: creating .env from template...
-    copy .env.example .env >nul
-)
-
-:: 4. Create virtual environment
+:: 3. Create virtual environment
 IF NOT EXIST "venv" (
     echo [INFO] Creating virtual environment...
     !PYTHON_CMD! -m venv venv
@@ -107,10 +101,10 @@ echo ===================================================
 echo   Installation complete!
 echo.
 echo   Next steps:
-echo   1. Open .env in a text editor
-echo   2. Set PHOTOGRAPHER_ID  ^(copy from dashboard.aipicsqr.com ^> Nodes^)
-echo   3. Set EVENT_ID         ^(from the Events page in the dashboard^)
-echo   4. Double-click AIPICSQR.bat to start the node
+echo   1. Double-click AIPICSQR.bat to start the node
+echo   2. On first run it will ask for your Photographer ID
+echo      ^(copy it from: dashboard.aipicsqr.com ^> Nodes^)
+echo   3. Use the 'setevent ^<id^>' command to set your active event
 echo ===================================================
 echo.
 pause

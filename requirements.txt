@@ -2,23 +2,18 @@
 # Python 3.10 - 3.13 required (3.12 recommended)
 # Install via Run-AIPICSQR.bat — do not run pip install manually.
 
-# Core
-opencv-contrib-python>=4.8.0,<5.0  # YuNet + SFace; pinned major to avoid ABI breaks
+# Computer vision (face detection + recognition)
+opencv-contrib-python>=4.8.0,<5.0  # YuNet + SFace
 numpy>=1.24.0,<3.0
-Pillow>=10.0.0,<12.0               # Image compression
 
-# Supabase — storage3<2.30.0 avoids pyiceberg (needs MSVC); --only-binary in bat is the safety net
-supabase>=2.5.0
-storage3>=0.7.0,<2.30.0            # 2.30.0 introduced pyiceberg (needs MSVC on Windows)
+# Image compression
+Pillow>=10.0.0,<12.0
 
 # Folder watching
-watchdog>=3.0.0                    # File system events
+watchdog>=3.0.0
 
-# System monitoring
-psutil>=5.9.0                      # CPU/memory/temp monitoring
+# System monitoring (CPU/temp)
+psutil>=5.9.0
 
-# Environment
-python-dotenv>=1.0.0               # .env file loading
-
-# Utilities
-requests>=2.31.0                   # HTTP requests
+# HTTP — all API calls go through requests; no Supabase SDK on the node
+requests>=2.31.0

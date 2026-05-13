@@ -14,6 +14,9 @@ env/
 .env
 !.env.example
 
+# Node registration — contains node_token, never commit
+node_config.json
+
 # AI models (large binaries — downloaded at runtime)
 models/
 
