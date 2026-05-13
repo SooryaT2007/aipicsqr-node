@@ -3,17 +3,19 @@ Photo Uploader Service
 ======================
 Pipeline for processing a new photo:
 1. Compress the image (Pillow)
-2. Get a presigned R2 URL from the API (no Supabase credentials needed)
+2. Get a presigned R2 URL from the API
 3. PUT the bytes directly to R2 (bypasses our server — no Vercel bandwidth used)
-4. Run face detection + recognition locally — ONLY for private/premium pool
-   (public pool photos skip face scan; they are for everyone to see)
-5. POST results to the API — server writes to Supabase
+4. Notify the API — server marks the photo done and queues face vectorization
+   on the highest-score available mesh node (private pool only).
+   Public pool photos are marked vectorized immediately; no face scan needed.
+
+Face detection is NOT done here. It runs in MeshWorker on whichever node
+the server assigns as best — completely independent of who uploaded the photo.
 
 folder_info dict: {id, event_id, path, pool_type, watch_until}
 """
 
 import logging
-import time
 from pathlib import Path
 
 import requests
@@ -35,19 +37,18 @@ logger = logging.getLogger('AIPICSQR-node')
 
 
 class PhotoUploader:
-    def __init__(self, config, api_client, vision_manager):
+    def __init__(self, config, api_client, vision_manager=None):
         self.config = config
         self.api = api_client
-        self.vision_manager = vision_manager
+        # vision_manager is intentionally unused here — face vectorization is
+        # handled by MeshWorker on whichever node the server assigns.
 
     def process_photo(self, file_path: str, folder_info: dict | None = None):
         path = Path(file_path)
 
-        # Resolve event context from folder_info (API-driven) or legacy config
         event_id = (folder_info or {}).get('event_id') or self.config.event_id
         folder_id = (folder_info or {}).get('id')
         pool_type = (folder_info or {}).get('pool_type', 'public')
-        is_public = pool_type == 'public'
 
         if not event_id:
             logger.warning(f'  No event set — skipping {path.name}')
@@ -83,31 +84,15 @@ class PhotoUploader:
             put_resp.raise_for_status()
             logger.info(f'  Uploaded OK')
 
-            # STEP 4: Face detection — skipped for public pool
-            if is_public:
-                logger.info(f'  Public pool — skipping face scan for {path.name}')
-                self.api.upload_complete(photo_id, file_size, width, height, [])
-                logger.info(f'  Done: {path.name} (public, no face scan)')
-                return
-
-            if self.vision_manager.should_delegate():
-                logger.info(f'  Resource limit — delegating {path.name} to mesh')
-                self.api.upload_complete(photo_id, file_size, width, height, [], delegated=True)
-                return
-
-            logger.info(f'  Running face detection...')
-            face_results = self.vision_manager.process_image(
-                file_path,
-                confidence_threshold=self.config.face_confidence_threshold,
-            )
-
-            # STEP 5: Send everything to the API
-            self.api.upload_complete(photo_id, file_size, width, height, face_results or [])
-
-            logger.info(
-                f'  Done: {path.name} [{pool_type}] — '
-                f'{len(face_results or [])} face(s), {file_size / 1024:.0f} KB'
-            )
+            # STEP 4: Notify API — server creates vectoring_job on best node
+            result = self.api.upload_complete(photo_id, file_size, width, height)
+            status = result.get('status', '?')
+            if status == 'vectorized':
+                logger.info(f'  Done: {path.name} [{pool_type}] — public, no face scan')
+            else:
+                assigned = result.get('assigned_to')
+                suffix = f' → node {assigned[:8]}' if assigned else ' (pending assignment)'
+                logger.info(f'  Done: {path.name} [{pool_type}] — queued for vectorization{suffix}')
 
         except Exception as e:
             logger.error(f'  Failed to process {path.name}: {e}')

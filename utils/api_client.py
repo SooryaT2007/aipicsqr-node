@@ -182,31 +182,19 @@ class APIClient:
         file_size: int,
         width: int,
         height: int,
-        face_results: list,
-        delegated: bool = False,
     ) -> dict:
         """
-        Notify the server that the photo has been uploaded.
-        If delegated=True, the server creates a vectoring_job for mesh processing
-        instead of marking the photo as vectorized.
-        Face vectors are only sent when delegated=False.
+        Notify the server that the photo has been uploaded to R2.
+        The server marks it done (public pool) or creates a vectoring_job
+        assigned to the highest-score online node (private pool).
+        Face detection is never done by the uploading node.
         """
-        face_vectors = [
-            {
-                'embedding': f['embedding'],
-                'bbox': f['bbox'],
-                'confidence': f['confidence'],
-            }
-            for f in face_results
-        ]
         payload = {
             **self._auth(),
             'photo_id':        photo_id,
             'file_size_bytes': file_size,
             'width':           width,
             'height':          height,
-            'face_vectors':    face_vectors,
-            'delegated':       delegated,
         }
         resp = self._post(
             f'{self._config.api_base_url}/api/node/upload/complete',
@@ -262,6 +250,48 @@ class APIClient:
         try:
             self._post(
                 f'{self._config.api_base_url}/api/node/jobs/{job_id}/fail',
+                json={**self._auth(), 'error': error},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    # ── Selfie jobs (guest face matching) ────────────────────────────────────
+
+    def get_selfie_jobs(self) -> list:
+        """Fetch face_search_jobs assigned to this node (guest selfies awaiting embedding)."""
+        resp = self._post(
+            f'{self._config.api_base_url}/api/node/selfie-jobs',
+            json=self._auth(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get('jobs', [])
+
+    def claim_selfie_job(self, job_id: str) -> dict:
+        resp = self._post(
+            f'{self._config.api_base_url}/api/node/selfie-jobs/{job_id}/claim',
+            json=self._auth(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def complete_selfie_job(self, job_id: str, embedding: list) -> dict:
+        """Send the 512-dim selfie embedding; server runs pgvector match and stores results."""
+        payload = {**self._auth(), 'embedding': embedding}
+        resp = self._post(
+            f'{self._config.api_base_url}/api/node/selfie-jobs/{job_id}/complete',
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def fail_selfie_job(self, job_id: str, error: str) -> None:
+        try:
+            self._post(
+                f'{self._config.api_base_url}/api/node/selfie-jobs/{job_id}/fail',
                 json={**self._auth(), 'error': error},
                 timeout=10,
             )
