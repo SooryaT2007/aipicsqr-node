@@ -14,8 +14,8 @@ Flow:
   4. For each new photo: compress → upload → face-scan (if private pool) → notify API
 
 Usage:
-    Run AIPICSQR.bat  (recommended)
-    python main.py    (manual)
+    Run.bat          (recommended — double-click)
+    python main.py   (manual)
 """
 
 import sys

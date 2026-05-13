@@ -1,14 +1,13 @@
 @echo off
 setlocal EnableDelayedExpansion
-title AIPICSQR - Node Installer
+title AIPICSQR Node - Installer
 
 echo ===================================================
-echo       AIPICSQR Photographer Node - Installer
+echo        AIPICSQR Photographer Node - Setup
 echo ===================================================
 echo.
 
 :: 1. Find Python — try 'python' first, fall back to 'py' launcher
-::    (py.exe is installed to Windows\ even when user skips "Add to PATH")
 set PYTHON_CMD=python
 python --version >nul 2>&1
 IF %ERRORLEVEL% NEQ 0 (
@@ -18,7 +17,7 @@ IF %ERRORLEVEL% NEQ 0 (
         echo.
         echo Please install Python 3.12 from:
         echo   https://www.python.org/downloads/release/python-3120/
-        echo IMPORTANT: During installation, check "Add python.exe to PATH".
+        echo IMPORTANT: Check "Add python.exe to PATH" during installation.
         echo.
         pause
         exit /b 1
@@ -34,77 +33,58 @@ for /f "tokens=1,2 delims=." %%a in ("!PYVER!") do (
 )
 IF !PYMAJOR! NEQ 3 (
     echo [ERROR] Python 3 required. Found: !PYVER!
-    echo Please install Python 3.12: https://www.python.org/downloads/
-    pause
-    exit /b 1
+    pause & exit /b 1
 )
 IF !PYMINOR! LSS 10 (
     echo [ERROR] Python 3.10 or newer required. Found: !PYVER!
-    echo Please install Python 3.12: https://www.python.org/downloads/
-    pause
-    exit /b 1
+    pause & exit /b 1
 )
 IF !PYMINOR! GEQ 14 (
-    echo [ERROR] Python !PYVER! is not yet supported by all required packages.
-    echo.
-    echo Please install Python 3.12 ^(recommended^):
+    echo [ERROR] Python !PYVER! not yet supported ^(use 3.12^).
     echo   https://www.python.org/downloads/release/python-3120/
-    echo.
-    echo Python 3.14 lacks prebuilt wheels for some C-extension dependencies.
-    pause
-    exit /b 1
+    pause & exit /b 1
 )
-echo [INFO] Python !PYVER! OK.
+echo [OK] Python !PYVER!
 
 :: 3. Create virtual environment
 IF NOT EXIST "venv" (
     echo [INFO] Creating virtual environment...
     !PYTHON_CMD! -m venv venv
-    IF !ERRORLEVEL! NEQ 0 (
-        echo [ERROR] Failed to create virtual environment.
-        pause
-        exit /b 1
-    )
+    IF !ERRORLEVEL! NEQ 0 ( echo [ERROR] venv creation failed. & pause & exit /b 1 )
 )
 
-:: From here we use the venv's Python directly — no PATH dependency needed
 set VENV_PY=venv\Scripts\python.exe
 set VENV_PIP=venv\Scripts\pip.exe
 
-:: 5. Install / update dependencies
-echo [INFO] Installing packages ^(this may take a few minutes on first run^)...
+:: 4. Install dependencies
+echo [INFO] Installing packages (first run may take a few minutes)...
 %VENV_PY% -m pip install --upgrade pip setuptools wheel -q
 %VENV_PIP% install --only-binary :all: -r requirements.txt
 IF !ERRORLEVEL! NEQ 0 (
     echo.
-    echo [ERROR] Failed to install dependencies.
-    echo.
-    echo If you see a Python version error, install Python 3.12:
+    echo [ERROR] Package installation failed.
+    echo If you see a version error, install Python 3.12:
     echo   https://www.python.org/downloads/release/python-3120/
-    echo.
-    pause
-    exit /b 1
+    pause & exit /b 1
 )
+echo [OK] Packages installed
 
-:: 6. Download AI models
+:: 5. Download AI models
 echo.
-echo [INFO] Checking / downloading AI models ^(face detection + recognition^)...
+echo [INFO] Downloading AI models (face detection + recognition)...
 %VENV_PY% download_models.py
 IF !ERRORLEVEL! NEQ 0 (
-    echo [ERROR] Failed to download AI models. Check your internet connection.
-    pause
-    exit /b 1
+    echo [ERROR] Model download failed. Check your internet connection.
+    pause & exit /b 1
 )
 
 echo.
 echo ===================================================
-echo   Installation complete!
+echo   Setup complete!
 echo.
-echo   Next steps:
-echo   1. Double-click AIPICSQR.bat to start the node
-echo   2. On first run it will ask for your Photographer ID
-echo      ^(copy it from: dashboard.aipicsqr.com ^> Nodes^)
-echo   3. Use the 'setevent ^<id^>' command to set your active event
+echo   Next step: double-click Run.bat to start the node.
+echo   On first launch it will ask for your Photographer ID
+echo   (copy it from dashboard.aipicsqr.com > Nodes).
 echo ===================================================
 echo.
 pause
