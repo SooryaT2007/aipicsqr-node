@@ -53,41 +53,48 @@ def _vision_worker(models_dir: str, task_queue: Queue, result_queue: Queue):
 
     result_queue.put({'type': MSG_RESULT, 'status': 'ready'})
 
-    while True:
-        try:
-            task = task_queue.get(timeout=1.0)
-        except Exception:
-            continue
+    try:
+        while True:
+            try:
+                task = task_queue.get(timeout=1.0)
+            except (KeyboardInterrupt, SystemExit):
+                break
+            except Exception:
+                continue
 
-        if task['type'] == MSG_SHUTDOWN:
-            break
+            if task['type'] == MSG_SHUTDOWN:
+                break
 
-        try:
-            if task['type'] == MSG_PROCESS_IMAGE:
-                results = vision.process_image(
-                    task['image_path'],
-                    task.get('confidence_threshold', 0.7),
-                )
+            try:
+                if task['type'] == MSG_PROCESS_IMAGE:
+                    results = vision.process_image(
+                        task['image_path'],
+                        task.get('confidence_threshold', 0.7),
+                    )
+                    result_queue.put({
+                        'type': MSG_RESULT,
+                        'task_id': task.get('task_id'),
+                        'results': results,
+                    })
+
+                elif task['type'] == MSG_PROCESS_SELFIE:
+                    embedding = vision.process_selfie(task['image_data'])
+                    result_queue.put({
+                        'type': MSG_RESULT,
+                        'task_id': task.get('task_id'),
+                        'embedding': embedding,
+                    })
+
+            except (KeyboardInterrupt, SystemExit):
+                break
+            except Exception as e:
                 result_queue.put({
-                    'type': MSG_RESULT,
+                    'type': MSG_ERROR,
                     'task_id': task.get('task_id'),
-                    'results': results,
+                    'error': str(e),
                 })
-
-            elif task['type'] == MSG_PROCESS_SELFIE:
-                embedding = vision.process_selfie(task['image_data'])
-                result_queue.put({
-                    'type': MSG_RESULT,
-                    'task_id': task.get('task_id'),
-                    'embedding': embedding,
-                })
-
-        except Exception as e:
-            result_queue.put({
-                'type': MSG_ERROR,
-                'task_id': task.get('task_id'),
-                'error': str(e),
-            })
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 class VisionProcessManager:
