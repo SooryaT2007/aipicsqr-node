@@ -90,9 +90,9 @@ class VisionService:
                 model=yunet_path,
                 config='',
                 input_size=(640, 480),
-                score_threshold=0.7,
+                score_threshold=0.5,
                 nms_threshold=0.3,
-                top_k=50,
+                top_k=5000,
                 backend_id=backend_id,
                 target_id=target_id,
             )

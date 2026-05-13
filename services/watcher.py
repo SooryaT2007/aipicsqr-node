@@ -11,6 +11,7 @@ The pool_type is forwarded to the uploader so it can decide whether to run
 face recognition (public pool skips it).
 """
 
+import os
 import time
 import logging
 import threading
@@ -149,6 +150,10 @@ class FolderWatcher:
             except Exception:
                 pass
         self._folder_info.pop(path, None)
+        # Clear processed-path entries for this folder so that re-adding the
+        # folder later causes all existing files to be re-uploaded.
+        prefix = str(Path(path).resolve()).rstrip(os.sep) + os.sep
+        self._processed_paths = {fp for fp in self._processed_paths if not fp.startswith(prefix)}
         logger.info(f'  ✋ Stopped watching: {path}')
 
     def _dispatch(self, file_path: str):

@@ -40,7 +40,7 @@ class Config:
         self.models_dir = Path(__file__).parent / 'models'
         self.yunet_model = str(self.models_dir / 'face_detection_yunet_2023mar.onnx')
         self.sface_model = str(self.models_dir / 'face_recognition_sface_2021dec.onnx')
-        self.face_confidence_threshold = 0.7
+        self.face_confidence_threshold = 0.5
         self.detection_input_size = (640, 480)
         self.embedding_dim = 512
 
