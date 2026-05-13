@@ -80,30 +80,20 @@ class ResourceMonitor:
                 # CPU temperature
                 self._cpu_temp = self._get_cpu_temp()
 
-                # Check thresholds
+                # Only pause on thermal limit — CPU% check removed
                 with self._lock:
-                    if self._cpu_percent > self.max_cpu_percent:
+                    if self._cpu_temp > self.max_cpu_temp:
                         if not self._paused:
                             logger.warning(
-                                f"âš ï¸ CPU at {self._cpu_percent:.0f}% "
-                                f"(limit: {self.max_cpu_percent}%). "
-                                f"Pausing vision processing."
-                            )
-                            self._paused = True
-                            self._pause_until = time.time() + self.cooldown_period
-
-                    elif self._cpu_temp > self.max_cpu_temp:
-                        if not self._paused:
-                            logger.warning(
-                                f"ðŸŒ¡ï¸ CPU temp at {self._cpu_temp:.1f}Â°C "
-                                f"(limit: {self.max_cpu_temp}Â°C). "
+                                f"CPU temp at {self._cpu_temp:.1f}C "
+                                f"(limit: {self.max_cpu_temp}C). "
                                 f"Pausing vision processing."
                             )
                             self._paused = True
                             self._pause_until = time.time() + self.cooldown_period
 
                     elif self._paused and time.time() >= self._pause_until:
-                        logger.info("âœ… Resources recovered. Resuming processing.")
+                        logger.info("Resources recovered. Resuming processing.")
                         self._paused = False
 
             except Exception as e:
