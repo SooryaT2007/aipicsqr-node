@@ -244,23 +244,32 @@ class VisionService:
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
+            logger.error('Could not decode selfie image bytes')
             return None
 
         h, w = img.shape[:2]
-        self._detector.setInputSize((w, h))
 
-        _, faces = self._detector.detect(img)
+        # Resize to 640px wide — same as process_image; YuNet anchors are tuned for this scale
+        detect_w = 640
+        scale = detect_w / w
+        detect_h = int(h * scale)
+        img_detect = cv2.resize(img, (detect_w, detect_h))
+
+        self._detector.setInputSize((detect_w, detect_h))
+        _, faces = self._detector.detect(img_detect)
 
         if faces is None or len(faces) == 0:
+            logger.warning('No face detected in selfie')
             return None
 
         # Take the largest face (most likely the selfie subject)
         largest_face = max(faces, key=lambda f: f[2] * f[3])
 
         try:
-            aligned = self._recognizer.alignCrop(img, largest_face)
+            # Align and embed from the resized image (no need to scale back for selfies)
+            aligned = self._recognizer.alignCrop(img_detect, largest_face)
             embedding = self._recognizer.feature(aligned)
             return embedding.flatten().tolist()
         except Exception as e:
-            logger.error(f"Selfie processing error: {e}")
+            logger.error(f'Selfie processing error: {e}')
             return None
