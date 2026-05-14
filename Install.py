@@ -178,6 +178,7 @@ class InstallerApp:
         self._installing = False
         self._spinner_idx = 0
         self._spinner_step: str | None = None
+        self._auto_installed = False
 
         self._apply_style()
         self._build_header()
@@ -350,6 +351,9 @@ class InstallerApp:
         else:
             self._btn_install.configure(text='Install', bg=BLUE_D)
             self._hdr_status.configure(text='● Not installed', fg=AMBER)
+            if not self._auto_installed:
+                self._auto_installed = True
+                self.root.after(1200, self._run_install)
 
     def _run_install(self):
         if self._installing:
@@ -728,6 +732,37 @@ class InstallerApp:
 
     # ── Uninstall tab ─────────────────────────────────────────────────────────
 
+    def _make_check_row(self, parent: tk.Frame, var: tk.BooleanVar,
+                        label: str, hint: str):
+        """Custom dark-mode toggle row (avoids Checkbutton selectcolor rendering bug)."""
+        row = tk.Frame(parent, bg=BG_CARD, padx=12, pady=7, cursor='hand2')
+        row.pack(fill=tk.X)
+
+        icon_lbl = tk.Label(row, bg=BG_CARD, font=('Segoe UI', 12), width=2, anchor='w')
+        text_lbl = tk.Label(row, text=label, bg=BG_CARD, fg=FG,
+                            font=('Segoe UI', 10), anchor='w', cursor='hand2')
+        hint_lbl = tk.Label(row, text=hint, bg=BG_CARD, fg=FG_MUTED,
+                            font=('Segoe UI', 8), cursor='hand2')
+
+        def refresh(*_):
+            if var.get():
+                icon_lbl.configure(text='✓', fg=GREEN)
+            else:
+                icon_lbl.configure(text='○', fg=FG_DIM)
+
+        var.trace_add('write', refresh)
+        refresh()
+
+        icon_lbl.pack(side=tk.LEFT)
+        text_lbl.pack(side=tk.LEFT, padx=(4, 0))
+        hint_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
+        def toggle(e=None):
+            var.set(not var.get())
+
+        for w in (row, icon_lbl, text_lbl, hint_lbl):
+            w.bind('<Button-1>', toggle)
+
     def _build_uninstall_tab(self):
         f = self._tab_uninstall
 
@@ -741,9 +776,9 @@ class InstallerApp:
 
         self._un_shortcut = tk.BooleanVar(value=True)
         self._un_stop     = tk.BooleanVar(value=True)
-        self._un_creds    = tk.BooleanVar(value=False)
-        self._un_models   = tk.BooleanVar(value=False)
-        self._un_venv     = tk.BooleanVar(value=False)
+        self._un_creds    = tk.BooleanVar(value=True)
+        self._un_models   = tk.BooleanVar(value=True)
+        self._un_venv     = tk.BooleanVar(value=True)
 
         opts = [
             (self._un_shortcut, 'Remove auto-start shortcut',
@@ -759,16 +794,7 @@ class InstallerApp:
         ]
 
         for var, label, hint in opts:
-            row = tk.Frame(card, bg=BG_CARD, padx=12, pady=6)
-            row.pack(fill=tk.X)
-            tk.Checkbutton(
-                row, variable=var, text=label,
-                bg=BG_CARD, fg=FG, selectcolor='#0c0a09',
-                activebackground=BG_CARD, activeforeground=FG,
-                font=('Segoe UI', 10), anchor='w',
-            ).pack(side=tk.LEFT)
-            tk.Label(row, text=hint, bg=BG_CARD, fg=FG_MUTED,
-                     font=('Segoe UI', 8)).pack(side=tk.LEFT, padx=(8, 0))
+            self._make_check_row(card, var, label, hint)
 
         tk.Frame(card, bg=BG_CARD, height=6).pack()
 
