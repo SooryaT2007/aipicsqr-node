@@ -130,6 +130,38 @@ def _register_node(photographer_id: str) -> tuple[str, str]:
     return node_id, node_token
 
 
+# ── Filesystem helpers ────────────────────────────────────────────────────────
+
+def _rmtree_robust(path: str) -> list[str]:
+    """Delete a directory tree on Windows, handling locked files gracefully.
+
+    Files that can't be deleted (e.g. in-use .pyd DLLs held by Defender or
+    another process) are scheduled for deletion on next reboot via MoveFileExW.
+    Returns a list of paths that were queued for reboot deletion.
+    """
+    import shutil as _shutil
+    import ctypes
+
+    MOVEFILE_DELAY_UNTIL_REBOOT = 4
+    pending: list[str] = []
+
+    def _onerror(func, fpath: str, _exc_info):
+        try:
+            os.chmod(fpath, 0o777)
+            func(fpath)
+            return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.kernel32.MoveFileExW(fpath, None, MOVEFILE_DELAY_UNTIL_REBOOT)
+        except Exception:
+            pass
+        pending.append(fpath)
+
+    _shutil.rmtree(path, onerror=_onerror)
+    return pending
+
+
 # ── Step-row widget ───────────────────────────────────────────────────────────
 
 class StepRow:
@@ -841,8 +873,6 @@ class InstallerApp:
         threading.Thread(target=self._uninstall_thread, daemon=True).start()
 
     def _uninstall_thread(self):
-        import shutil
-
         def ui(fn): self.root.after(0, fn)
         def log(msg, c=FG_MUTED): ui(lambda: self._ulog(msg, c))
 
@@ -908,11 +938,11 @@ class InstallerApp:
         # ── Delete AI models
         if self._un_models.get():
             if MODELS_DIR.exists():
-                try:
-                    shutil.rmtree(str(MODELS_DIR))
+                pending = _rmtree_robust(str(MODELS_DIR))
+                if pending:
+                    log(f'Models mostly deleted — {len(pending)} locked file(s) queued for next reboot', AMBER)
+                else:
                     log('AI models deleted', GREEN)
-                except Exception as e:
-                    log(f'Could not delete models: {e}', RED)
             else:
                 log('Models directory not found — skipping', FG_MUTED)
 
@@ -920,11 +950,11 @@ class InstallerApp:
         if self._un_venv.get():
             venv_dir = BASE_DIR / 'venv'
             if venv_dir.exists():
-                try:
-                    shutil.rmtree(str(venv_dir))
+                pending = _rmtree_robust(str(venv_dir))
+                if pending:
+                    log(f'venv mostly deleted — {len(pending)} locked file(s) queued for next reboot', AMBER)
+                else:
                     log('Virtual environment deleted', GREEN)
-                except Exception as e:
-                    log(f'Could not delete venv: {e}', RED)
             else:
                 log('venv not found — skipping', FG_MUTED)
 
