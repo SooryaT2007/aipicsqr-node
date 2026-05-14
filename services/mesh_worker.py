@@ -83,7 +83,7 @@ class MeshWorker:
             self._rate_limit = max(2, min(rpm, 120))
         except Exception:
             self._rate_limit = 4
-        logger.info(f'  Mesh rate limit: {self._rate_limit} jobs/min')
+        logger.debug(f'Mesh rate limit: {self._rate_limit} jobs/min')
         return self._rate_limit
 
     def _within_rate_limit(self) -> bool:
@@ -145,7 +145,7 @@ class MeshWorker:
     # ── Vectoring job ──────────────────────────────────────────────────────────
 
     def _process_vectoring_job(self, job_id: str, photo_id: str, r2_url: str):
-        logger.info(f'  Mesh: vectoring job {job_id[:8]}...')
+        logger.debug(f'Mesh: vectoring job {job_id[:8]}...')
         try:
             self.api.claim_job(job_id)
 
@@ -170,7 +170,7 @@ class MeshWorker:
 
             self.api.complete_job(job_id, photo_id, face_results or [])
             self._record_job_done()
-            logger.info(f'  Mesh: vectoring {job_id[:8]} done — {len(face_results or [])} face(s)')
+            logger.debug(f'Mesh: vectoring {job_id[:8]} done — {len(face_results or [])} face(s)')
 
         except Exception as e:
             logger.error(f'  Mesh: vectoring {job_id[:8]} failed: {e}')
@@ -180,42 +180,40 @@ class MeshWorker:
 
     def _process_selfie_job(self, job: dict):
         job_id = job['id']
-        logger.info(f'  Mesh: selfie job {job_id[:8]}...')
+        logger.debug(f'Mesh: selfie job {job_id[:8]}...')
         try:
             self.api.claim_selfie_job(job_id)
 
             selfie_b64 = job.get('selfie_base64', '')
             if not selfie_b64:
-                logger.error(f'  Mesh: selfie {job_id[:8]} — no selfie_base64 in job payload')
+                logger.error(f'Mesh: selfie {job_id[:8]} — no selfie data in payload')
                 self.api.fail_selfie_job(job_id, 'No selfie data')
                 return
 
-            logger.info(f'  Mesh: selfie {job_id[:8]} — raw b64 length={len(selfie_b64):,} chars')
+            logger.debug(f'Mesh: selfie {job_id[:8]} — b64 length={len(selfie_b64):,}')
 
-            # Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
             if ',' in selfie_b64:
-                prefix, selfie_b64 = selfie_b64.split(',', 1)
-                logger.info(f'  Mesh: stripped data URI prefix: {prefix[:40]}')
+                _, selfie_b64 = selfie_b64.split(',', 1)
 
             try:
                 image_bytes = base64.b64decode(selfie_b64)
-                logger.info(f'  Mesh: selfie {job_id[:8]} — decoded to {len(image_bytes):,} bytes')
+                logger.debug(f'Mesh: selfie {job_id[:8]} — {len(image_bytes):,} bytes decoded')
             except Exception as decode_err:
-                logger.error(f'  Mesh: selfie {job_id[:8]} — base64 decode failed: {decode_err}')
+                logger.error(f'Mesh: selfie {job_id[:8]} — decode failed: {decode_err}')
                 self.api.fail_selfie_job(job_id, f'base64 decode error: {decode_err}')
                 return
 
             embedding = self.vision_manager.process_selfie(image_bytes, timeout=15.0)
 
             if not embedding:
-                logger.warning(f'  Mesh: selfie {job_id[:8]} — vision returned no embedding (no face detected)')
+                logger.warning(f'Mesh: selfie {job_id[:8]} — no face detected')
                 self.api.fail_selfie_job(job_id, 'No face detected in selfie')
                 return
 
-            logger.info(f'  Mesh: selfie {job_id[:8]} — embedding dim={len(embedding)}, posting to server')
+            logger.debug(f'Mesh: selfie {job_id[:8]} — dim={len(embedding)}, posting')
             self.api.complete_selfie_job(job_id, embedding)
             self._record_job_done()
-            logger.info(f'  Mesh: selfie {job_id[:8]} done ✅')
+            logger.debug(f'Mesh: selfie {job_id[:8]} done')
 
         except Exception as e:
             logger.error(f'  Mesh: selfie {job_id[:8]} failed: {e}', exc_info=True)

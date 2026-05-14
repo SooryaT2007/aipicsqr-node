@@ -45,7 +45,7 @@ def setup_logger(name: str, log_dir: str = None) -> logging.Logger:
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(logging.DEBUG)
         file_fmt = logging.Formatter(
-            '%(asctime)s │ %(levelname)-7s │ %(name)s │ %(message)s'
+            '%(asctime)s │ %(levelname)-7s │ %(module)s │ %(message)s'
         )
         file_handler.setFormatter(file_fmt)
         logger.addHandler(file_handler)

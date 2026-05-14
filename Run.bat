@@ -1,25 +1,14 @@
 @echo off
-title AIPICSQR Photographer Node
+cd /d "%~dp0"
 
-IF NOT EXIST "venv\Scripts\python.exe" (
-    echo [ERROR] Node is not set up yet.
-    echo.
-    echo Please run Install.bat first.
-    echo.
+if not exist "%~dp0venv\Scripts\pythonw.exe" (
+    echo [ERROR] Node is not installed. Run Install.bat first.
     pause
     exit /b 1
 )
 
-echo ===================================================
-echo        AIPICSQR Photographer Node
-echo ===================================================
-echo.
-echo Folders are managed from your dashboard.
-echo Press Ctrl+C to stop.
-echo.
+REM Launch the node with no console window (pythonw = windowless Python)
+start "" /B "%~dp0venv\Scripts\pythonw.exe" "%~dp0main.py"
 
-venv\Scripts\python.exe main.py
-
-echo.
-echo [INFO] Node stopped.
-pause
+echo Node started in background. Use App.py to view activity.
+timeout /t 2 /nobreak >nul

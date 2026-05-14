@@ -1,6 +1,7 @@
 """
 Node configuration — stored in node_config.json, never in .env.
 No cloud credentials are kept on the photographer's laptop.
+Supports multiple linked photographer IDs; one is active at a time.
 """
 
 import json
@@ -12,21 +13,12 @@ API_BASE_URL = 'https://dashboard.aipicsqr.com'
 
 class Config:
     """
-    All persistent identity state (photographer_id, node_id, node_token)
-    lives in node_config.json which is created automatically on first run.
-    Everything else is a sensible default that can be overridden via CLI.
+    All persistent identity state lives in node_config.json, created on first
+    registration.  Multiple photographer IDs can be stored; switching the
+    active ID (via App.py) requires a node restart to take effect.
     """
 
     def __init__(self):
-        # Identity — populated on first-run registration
-        self.photographer_id = ''
-        self.node_id = ''
-        self.node_token = ''
-        self.event_id = ''
-
-        # Folder watching
-        self.scan_folders: list[str] = [str(Path(__file__).parent / 'photos')]
-
         # API
         self.api_base_url = API_BASE_URL
 
@@ -52,6 +44,12 @@ class Config:
         # Telemetry
         self.pulse_interval = 60
 
+        # Persistent identity (populated from node_config.json)
+        self._photographer_ids: list[str] = []
+        self._active_photographer_id: str = ''
+        self._node_identities: dict = {}  # {photographer_id: {node_id, node_token}}
+        self._event_id: str = ''
+
         self._load()
 
     # ── Persistence ──────────────────────────────────────────────────────────
@@ -61,45 +59,89 @@ class Config:
             return
         try:
             data = json.loads(CONFIG_PATH.read_text(encoding='utf-8'))
-            self.photographer_id = data.get('photographer_id', '')
-            self.node_id = data.get('node_id', '')
-            self.node_token = data.get('node_token', '')
-            self.event_id = data.get('event_id', '')
-            folders = data.get('scan_folders', [])
-            if folders:
-                self.scan_folders = folders
         except Exception:
-            pass
+            return
+
+        # New multi-ID format
+        self._photographer_ids = list(data.get('photographer_ids', []))
+        self._active_photographer_id = data.get('active_photographer_id', '')
+        self._node_identities = data.get('node_identities', {})
+        self._event_id = data.get('event_id', '')
+
+        # Legacy single-ID migration
+        legacy_pid = data.get('photographer_id', '')
+        legacy_nid = data.get('node_id', '')
+        legacy_tok = data.get('node_token', '')
+        if legacy_pid:
+            if legacy_pid not in self._photographer_ids:
+                self._photographer_ids.insert(0, legacy_pid)
+            if not self._active_photographer_id:
+                self._active_photographer_id = legacy_pid
+            if legacy_nid and legacy_tok and legacy_pid not in self._node_identities:
+                self._node_identities[legacy_pid] = {
+                    'node_id': legacy_nid,
+                    'node_token': legacy_tok,
+                }
+
+        # Ensure active_id is consistent
+        if self._active_photographer_id not in self._photographer_ids:
+            self._active_photographer_id = self._photographer_ids[0] if self._photographer_ids else ''
 
     def save(self):
         data = {
-            'photographer_id': self.photographer_id,
-            'node_id': self.node_id,
-            'node_token': self.node_token,
-            'event_id': self.event_id,
-            'scan_folders': self.scan_folders,
+            'photographer_ids': self._photographer_ids,
+            'active_photographer_id': self._active_photographer_id,
+            'node_identities': self._node_identities,
+            'event_id': self._event_id,
         }
         CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding='utf-8')
+
+    # ── Properties (drop-in for old single-ID callers) ───────────────────────
+
+    @property
+    def photographer_id(self) -> str:
+        return self._active_photographer_id
+
+    @property
+    def node_id(self) -> str:
+        return self._node_identities.get(self._active_photographer_id, {}).get('node_id', '')
+
+    @property
+    def node_token(self) -> str:
+        return self._node_identities.get(self._active_photographer_id, {}).get('node_token', '')
+
+    @property
+    def event_id(self) -> str:
+        return self._event_id
 
     # ── Registration helpers ──────────────────────────────────────────────────
 
     def apply_registration(self, photographer_id: str, node_id: str, node_token: str):
-        self.photographer_id = photographer_id
-        self.node_id = node_id
-        self.node_token = node_token
+        """Store node identity for the given photographer and make them active."""
+        if photographer_id not in self._photographer_ids:
+            self._photographer_ids.append(photographer_id)
+        self._active_photographer_id = photographer_id
+        self._node_identities[photographer_id] = {
+            'node_id': node_id,
+            'node_token': node_token,
+        }
         self.save()
 
     def clear_pairing(self):
-        self.photographer_id = ''
-        self.node_id = ''
-        self.node_token = ''
-        self.event_id = ''
+        """Remove the active photographer's identity (logout)."""
+        pid = self._active_photographer_id
+        if pid in self._photographer_ids:
+            self._photographer_ids.remove(pid)
+        self._node_identities.pop(pid, None)
+        self._active_photographer_id = self._photographer_ids[0] if self._photographer_ids else ''
         self.save()
 
     # ── State checks ─────────────────────────────────────────────────────────
 
     def is_registered(self) -> bool:
-        return bool(self.photographer_id and self.node_id and self.node_token)
+        pid = self._active_photographer_id
+        identity = self._node_identities.get(pid, {})
+        return bool(pid and identity.get('node_id') and identity.get('node_token'))
 
     def is_ready(self) -> bool:
-        return self.is_registered() and bool(self.event_id)
+        return self.is_registered() and bool(self._event_id)
