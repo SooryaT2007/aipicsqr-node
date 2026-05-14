@@ -298,6 +298,20 @@ class APIClient:
         except Exception:
             pass
 
+    # ── Graceful shutdown ─────────────────────────────────────────────────────
+
+    def go_offline(self) -> None:
+        """Mark this node offline immediately on graceful shutdown.
+        Best-effort: if the network is down the pulse timeout cleans up naturally."""
+        try:
+            self._post(
+                f'{self._config.api_base_url}/api/node/offline',
+                json=self._auth(),
+                timeout=5,
+            )
+        except Exception:
+            pass
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _local_ip(self) -> str:

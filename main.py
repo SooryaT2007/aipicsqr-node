@@ -326,6 +326,11 @@ def main():
         wait_for_shutdown(shutdown_event)
     finally:
         logger.info('Stopping services...')
+
+        # Mark offline immediately — don't wait for the 2-min pulse timeout
+        logger.info('Marking node offline...')
+        api.go_offline()
+
         watcher.stop()
         telemetry.stop()
         mesh_worker.stop()
