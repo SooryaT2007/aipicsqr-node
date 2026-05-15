@@ -415,8 +415,16 @@ class NodeApp:
                         self._otp_var.set('')
                     self._refresh_lb()
                     messagebox.showinfo('Logged in!',
-                        f'Logged in as:\n{photographer_id[:8]}…{photographer_id[-4:]}\n\n'
-                        'Start the Runner (Runner.bat) to begin processing photos.')
+                        f'Logged in as:\n{photographer_id[:8]}…{photographer_id[-4:]}')
+                    # Auto-start Runner if it isn't already running
+                    if _find_runner() is None:
+                        try:
+                            _launch_runner()
+                            self._append_log(
+                                f'[APP] Runner started at {datetime.now().strftime("%H:%M:%S")}',
+                                FG_MUT)
+                        except Exception as e:
+                            messagebox.showerror('Failed to start Runner', str(e))
                 self.root.after(0, finish)
             except (ValueError, ConnectionError) as e:
                 self.root.after(0, lambda: messagebox.showerror('Failed', str(e)))
