@@ -1,11 +1,11 @@
 """
-AIPICSQR Photographer Node
-===========================
+AIPICSQR Photographer Node — Runner
+=====================================
 Headless background worker. Watches folders for new photos, compresses and
 uploads them to Cloudflare R2, and processes face-recognition mesh jobs.
 
-Configure via App.py (link a Photographer ID there first).
-Run headlessly via Run.bat, or start from within App.py.
+Configure via APP.py (log in with a Photographer ID there first).
+Run headlessly via Runner.bat, or start from within APP.py.
 """
 
 import sys
@@ -56,7 +56,7 @@ def main():
     api = APIClient(config)
 
     if not config.is_registered():
-        logger.error('Node not configured — open App.py to link a Photographer ID.')
+        logger.error('Node not configured — open APP.py to log in with a Photographer ID.')
         sys.exit(1)
 
     logger.info(f'Photographer : {config.photographer_id}')
@@ -71,7 +71,6 @@ def main():
     signal.signal(signal.SIGINT,  signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Start services
     resource_monitor = ResourceMonitor(
         max_cpu_percent=config.max_cpu_percent,
         max_cpu_temp=config.max_cpu_temp,
@@ -121,7 +120,7 @@ def main():
     logger.info('OK Mesh Worker started')
 
     logger.info('-' * 60)
-    logger.info('  Node running. Folders are managed from your dashboard.')
+    logger.info('  Runner active. Folders are managed from your dashboard.')
     logger.info('-' * 60)
 
     try:

@@ -1,26 +1,23 @@
 """
-AIPIXQR Node — Setup & Account Manager
-=======================================
-Primary entry point for the Photographer Node.
+AIPIXQR Node — Installer
+=========================
+Installs and uninstalls the Photographer Node.
 
-  Setup tab   — step-by-step installer with live progress output.
-  Account tab — link / unlink photographer IDs via full UUID or
-                the 6-digit Quick Connect code shown on the dashboard.
+  Setup tab     — step-by-step installer with live progress output.
+  Uninstall tab — selective removal of components.
+
+After a successful install, APP.py opens automatically so you can log in
+and start the Runner.
 
 Uses only Python standard library so it works before the venv exists.
-Launch via Install.bat or directly: python Install.py
+Launch via Installer.bat or directly: python Installer.py
 """
 
-import json
 import os
-import socket
 import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
-from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -36,16 +33,15 @@ DL_MODELS    = BASE_DIR / 'download_models.py'
 MODELS_DIR   = BASE_DIR / 'models'
 YUNET_MODEL  = MODELS_DIR / 'face_detection_yunet_2023mar.onnx'
 SFACE_MODEL  = MODELS_DIR / 'face_recognition_sface_2021dec.onnx'
-API_BASE     = 'https://dashboard.aipicsqr.com'
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
-BG        = '#1c1917'   # stone-900
-BG_CARD   = '#292524'   # stone-800
-BG_LOG    = '#0c0a09'   # stone-950
-FG        = '#e7e5e4'   # stone-200
-FG_MUTED  = '#78716c'   # stone-500
-FG_DIM    = '#44403c'   # stone-700
+BG        = '#1c1917'
+BG_CARD   = '#292524'
+BG_LOG    = '#0c0a09'
+FG        = '#e7e5e4'
+FG_MUTED  = '#78716c'
+FG_DIM    = '#44403c'
 GREEN     = '#22c55e'
 RED       = '#ef4444'
 AMBER     = '#f59e0b'
@@ -53,92 +49,10 @@ BLUE      = '#3b82f6'
 BLUE_D    = '#1d4ed8'
 
 
-# ── Config helpers ────────────────────────────────────────────────────────────
-
-def _read_config() -> dict:
-    if not CONFIG_PATH.exists():
-        return {}
-    try:
-        return json.loads(CONFIG_PATH.read_text('utf-8'))
-    except Exception:
-        return {}
-
-def _write_config(data: dict):
-    CONFIG_PATH.write_text(json.dumps(data, indent=2), 'utf-8')
-
-def _get_ids() -> tuple[list[str], str, dict]:
-    d = _read_config()
-    ids = list(d.get('photographer_ids', []))
-    legacy = d.get('photographer_id', '')
-    if legacy and legacy not in ids:
-        ids.insert(0, legacy)
-    active = d.get('active_photographer_id', ids[0] if ids else '')
-    identities = d.get('node_identities', {})
-    if legacy and d.get('node_id') and legacy not in identities:
-        identities[legacy] = {'node_id': d['node_id'], 'node_token': d['node_token']}
-    return ids, active, identities
-
-def _save_ids(ids: list[str], active: str, identities: dict):
-    _write_config({'photographer_ids': ids, 'active_photographer_id': active,
-                   'node_identities': identities})
-
-
-# ── API (stdlib only — works before venv) ────────────────────────────────────
-
-def _api_post(path: str, body: dict) -> dict:
-    url = f'{API_BASE}{path}'
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        raw = e.read()
-        try:
-            return {'_status': e.code, **json.loads(raw)}
-        except Exception:
-            return {'_status': e.code, 'error': raw.decode('utf-8', 'replace')}
-    except Exception as exc:
-        raise ConnectionError(str(exc))
-
-def _local_ip() -> str:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return '127.0.0.1'
-
-def _resolve_otp(otp_code: str) -> str:
-    res = _api_post('/api/nodes/resolve-otp', {'otp_code': otp_code})
-    if res.get('_status') == 404 or not res.get('photographer_id'):
-        raise ValueError(res.get('error', 'Code not found or expired'))
-    return res['photographer_id']
-
-def _register_node(photographer_id: str) -> tuple[str, str]:
-    res = _api_post('/api/node/register', {
-        'photographer_id': photographer_id,
-        'hostname': socket.gethostname(),
-        'ip_address': _local_ip(),
-    })
-    node_id    = res.get('node_id', '')
-    node_token = res.get('node_token', '')
-    if not node_id or not node_token:
-        raise ValueError(res.get('error', 'Registration failed'))
-    return node_id, node_token
-
-
 # ── Filesystem helpers ────────────────────────────────────────────────────────
 
 def _rmtree_robust(path: str) -> list[str]:
-    """Delete a directory tree on Windows, handling locked files gracefully.
-
-    Files that can't be deleted (e.g. in-use .pyd DLLs held by Defender or
-    another process) are scheduled for deletion on next reboot via MoveFileExW.
-    Returns a list of paths that were queued for reboot deletion.
-    """
+    """Delete a directory tree on Windows, handling locked files gracefully."""
     import shutil as _shutil
     import ctypes
 
@@ -198,19 +112,18 @@ class StepRow:
 class InstallerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title('AIPIXQR Node')
-        self.root.geometry('700x580')
-        self.root.minsize(620, 500)
+        self.root.title('AIPIXQR Node — Installer')
+        self.root.geometry('700x540')
+        self.root.minsize(620, 460)
         self.root.configure(bg=BG)
         try:
             self.root.iconbitmap(str(BASE_DIR / 'icon.ico'))
         except Exception:
             pass
 
-        self._installing = False
-        self._spinner_idx = 0
+        self._installing   = False
+        self._spinner_idx  = 0
         self._spinner_step: str | None = None
-        self._auto_installed = False
 
         self._apply_style()
         self._build_header()
@@ -219,14 +132,11 @@ class InstallerApp:
         nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
 
         self._tab_setup     = tk.Frame(nb, bg=BG)
-        self._tab_account   = tk.Frame(nb, bg=BG)
         self._tab_uninstall = tk.Frame(nb, bg=BG)
         nb.add(self._tab_setup,     text='  Setup  ')
-        nb.add(self._tab_account,   text='  Account  ')
         nb.add(self._tab_uninstall, text='  Uninstall  ')
 
         self._build_setup_tab()
-        self._build_account_tab()
         self._build_uninstall_tab()
 
         self._check_initial_state()
@@ -262,7 +172,6 @@ class InstallerApp:
     def _build_setup_tab(self):
         f = self._tab_setup
 
-        # Steps card
         card = tk.Frame(f, bg=BG_CARD)
         card.pack(fill=tk.X, padx=12, pady=(12, 6))
 
@@ -281,13 +190,11 @@ class InstallerApp:
             self._steps[key] = StepRow(card, label)
         tk.Frame(card, bg=BG_CARD, height=6).pack()
 
-        # Progress bar (hidden until install runs)
         self._progress_var = tk.DoubleVar(value=0)
         self._progress_bar = ttk.Progressbar(f, variable=self._progress_var,
                                               maximum=100, length=300,
                                               style='Horizontal.TProgressbar')
 
-        # Log output
         log_frame = tk.Frame(f, bg=BG_LOG, bd=1, relief=tk.SUNKEN)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
 
@@ -300,7 +207,6 @@ class InstallerApp:
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._setup_log.pack(fill=tk.BOTH, expand=True)
 
-        # Install button
         btn_row = tk.Frame(f, bg=BG)
         btn_row.pack(pady=8)
         self._btn_install = tk.Button(
@@ -312,7 +218,6 @@ class InstallerApp:
         self._btn_install.pack()
 
     def _slog(self, msg: str, color: str = FG_MUTED):
-        """Append a line to the setup log area."""
         self._setup_log.configure(state=tk.NORMAL)
         self._setup_log.insert(tk.END, msg + '\n', f'c{id(color)}')
         self._setup_log.tag_configure(f'c{id(color)}', foreground=color)
@@ -327,27 +232,22 @@ class InstallerApp:
     # ── Install flow ──────────────────────────────────────────────────────────
 
     def _check_initial_state(self):
-        """Silently check which steps are already done on startup."""
         def task():
             states = self._probe_steps()
             self.root.after(0, lambda: self._apply_states(states))
         threading.Thread(target=task, daemon=True).start()
 
     def _probe_steps(self) -> dict[str, tuple[str, str]]:
-        """Returns {key: (state, note)} without running any installs."""
         results: dict[str, tuple[str, str]] = {}
 
-        # Python
         v = sys.version_info
         if v.major == 3 and 10 <= v.minor <= 13:
             results['python'] = ('done', f'Python {v.major}.{v.minor}.{v.micro}')
         else:
             results['python'] = ('error', f'{v.major}.{v.minor} not supported')
 
-        # Venv
         results['venv'] = ('done', 'ready') if VENV_PYTHON.exists() else ('pending', '')
 
-        # Deps
         if VENV_PYTHON.exists():
             ok = subprocess.run(
                 [str(VENV_PYTHON), '-c', 'import cv2, PIL, watchdog, psutil, requests'],
@@ -357,13 +257,11 @@ class InstallerApp:
         else:
             results['deps'] = ('pending', '')
 
-        # Models
         if YUNET_MODEL.exists() and SFACE_MODEL.exists():
             results['models'] = ('done', 'ready')
         else:
             results['models'] = ('pending', '')
 
-        # Startup shortcut
         startup_dir = os.path.join(
             os.environ.get('APPDATA', ''), r'Microsoft\Windows\Start Menu\Programs\Startup'
         )
@@ -383,9 +281,6 @@ class InstallerApp:
         else:
             self._btn_install.configure(text='Install', bg=BLUE_D)
             self._hdr_status.configure(text='● Not installed', fg=AMBER)
-            if not self._auto_installed:
-                self._auto_installed = True
-                self.root.after(1200, self._run_install)
 
     def _run_install(self):
         if self._installing:
@@ -447,7 +342,6 @@ class InstallerApp:
 
         if not deps_ok:
             log('Installing packages…')
-            # Upgrade pip silently first
             subprocess.run([str(VENV_PYTHON), '-m', 'pip', 'install', '--quiet',
                             '--upgrade', 'pip'], capture_output=True)
             p = subprocess.Popen(
@@ -517,17 +411,17 @@ class InstallerApp:
                 log_fn('Startup folder not found — skipping shortcut')
                 return False
 
-            shortcut  = os.path.join(startup_dir, 'AIPIXQR Node.lnk')
-            pythonw   = str(VENV_PYTHONW)
-            main_py   = str(BASE_DIR / 'main.py')
-            work_dir  = str(BASE_DIR)
+            shortcut   = os.path.join(startup_dir, 'AIPIXQR Node.lnk')
+            pythonw    = str(VENV_PYTHONW)
+            runner_py  = str(BASE_DIR / 'Runner.py')
+            work_dir   = str(BASE_DIR)
 
             vbs = BASE_DIR / '_shortcut_tmp.vbs'
             vbs.write_text(
                 f'Set w = CreateObject("WScript.Shell")\n'
                 f'Set s = w.CreateShortcut("{shortcut}")\n'
                 f's.TargetPath = "{pythonw}"\n'
-                f's.Arguments = Chr(34) & "{main_py}" & Chr(34)\n'
+                f's.Arguments = Chr(34) & "{runner_py}" & Chr(34)\n'
                 f's.WorkingDirectory = "{work_dir}"\n'
                 f's.WindowStyle = 7\n'
                 f's.Description = "AIPIXQR Node background processor"\n'
@@ -546,6 +440,15 @@ class InstallerApp:
             log_fn(f'Shortcut error: {e}')
             return False
 
+    def _launch_app(self):
+        try:
+            app_py  = BASE_DIR / 'APP.py'
+            pythonw = VENV_PYTHONW if VENV_PYTHONW.exists() else Path(sys.executable).parent / 'pythonw.exe'
+            flags   = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            subprocess.Popen([str(pythonw), str(app_py)], cwd=str(BASE_DIR), creationflags=flags)
+        except Exception:
+            pass
+
     def _finish_install(self, success: bool):
         self._installing = False
         self._btn_install.configure(state=tk.NORMAL)
@@ -553,6 +456,7 @@ class InstallerApp:
             self._btn_install.configure(text='Repair / Reinstall', bg='#44403c')
             self._hdr_status.configure(text='● Ready', fg=GREEN)
             self._slog('Installation complete!', GREEN)
+            self.root.after(800, self._launch_app)
         else:
             self._btn_install.configure(text='Retry Install', bg=BLUE_D)
             self._hdr_status.configure(text='● Install failed', fg=RED)
@@ -567,206 +471,10 @@ class InstallerApp:
             self._spinner_idx += 1
         self.root.after(400, self._spinner_tick)
 
-    # ── Account tab ───────────────────────────────────────────────────────────
-
-    def _build_account_tab(self):
-        f = self._tab_account
-
-        # Left: ID list
-        left = tk.Frame(f, bg=BG)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 4), pady=12)
-
-        tk.Label(left, text='Linked Photographers', bg=BG, fg=FG,
-                 font=('Segoe UI', 11, 'bold')).pack(anchor=tk.W)
-        tk.Label(left, text='▶ active  ·  right-click for full ID',
-                 bg=BG, fg=FG_MUTED, font=('Segoe UI', 8)).pack(anchor=tk.W, pady=(2, 8))
-
-        lb_wrap = tk.Frame(left, bg=BG_LOG, bd=1, relief=tk.SUNKEN)
-        lb_wrap.pack(fill=tk.BOTH, expand=True)
-        self._lb = tk.Listbox(lb_wrap, font=('Consolas', 10), activestyle='none',
-                               selectmode=tk.SINGLE, bg=BG_LOG, fg=FG,
-                               selectbackground='#374151', borderwidth=0,
-                               highlightthickness=0)
-        lsb = tk.Scrollbar(lb_wrap, command=self._lb.yview)
-        self._lb.configure(yscrollcommand=lsb.set)
-        lsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self._lb.pack(fill=tk.BOTH, expand=True)
-        self._lb.bind('<Button-3>', self._show_full_id)
-
-        btn_row = tk.Frame(left, bg=BG)
-        btn_row.pack(fill=tk.X, pady=(6, 0))
-        self._mk_btn(btn_row, 'Set Active', self._set_active, bg=BG_CARD).pack(
-            side=tk.LEFT, padx=(0, 4))
-        self._mk_btn(btn_row, 'Unlink', self._unlink, fg=RED).pack(side=tk.LEFT)
-        self._mk_btn(left, 'Logout All', self._logout_all, fg=RED).pack(
-            anchor=tk.W, pady=(10, 0))
-
-        # Right: link forms
-        right = tk.Frame(f, bg=BG_CARD, bd=0)
-        right.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 12), pady=12, ipadx=12, ipady=12)
-        right.pack_propagate(False)
-        right.configure(width=300)
-
-        # Via full ID
-        tk.Label(right, text='Link via Photographer ID', bg=BG_CARD, fg=FG,
-                 font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W, padx=10, pady=(12, 2))
-        tk.Label(right, text='dashboard.aipicsqr.com → Nodes → Copy ID',
-                 bg=BG_CARD, fg=FG_MUTED, font=('Segoe UI', 8)).pack(anchor=tk.W, padx=10)
-
-        self._id_entry = tk.Entry(right, font=('Consolas', 9),
-                                   bg='#0c0a09', fg=FG, insertbackground=FG,
-                                   relief=tk.FLAT, bd=1)
-        self._id_entry.pack(fill=tk.X, padx=10, pady=(8, 4))
-        self._id_entry.bind('<Return>', lambda _: self._link_via_id())
-        self._mk_btn(right, 'Link Photographer ID', self._link_via_id,
-                     bg=BLUE_D, fg='white').pack(fill=tk.X, padx=10, pady=(0, 16))
-
-        tk.Frame(right, bg=FG_DIM, height=1).pack(fill=tk.X, padx=10, pady=(0, 12))
-
-        # Via OTP
-        tk.Label(right, text='Quick Connect  (6-digit code)', bg=BG_CARD, fg=FG,
-                 font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W, padx=10, pady=(0, 2))
-        tk.Label(right,
-                 text='Open your dashboard → Nodes page and\n'
-                      'enter the Quick Connect code shown there.\n'
-                      'Code refreshes every 3 minutes.',
-                 bg=BG_CARD, fg=FG_MUTED, font=('Segoe UI', 8),
-                 justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=(0, 10))
-
-        otp_row = tk.Frame(right, bg=BG_CARD)
-        otp_row.pack(fill=tk.X, padx=10)
-
-        self._otp_var = tk.StringVar()
-        self._otp_var.trace_add('write', self._on_otp_type)
-        otp_e = tk.Entry(otp_row, textvariable=self._otp_var,
-                         font=('Consolas', 22), width=7, justify=tk.CENTER,
-                         bg='#0c0a09', fg=FG, insertbackground=FG, relief=tk.FLAT, bd=1)
-        otp_e.pack(side=tk.LEFT)
-        otp_e.bind('<Return>', lambda _: self._link_via_otp())
-
-        self._btn_otp = tk.Button(otp_row, text='Link', command=self._link_via_otp,
-                                   bg='#14532d', fg='white',
-                                   activebackground='#166534', activeforeground='white',
-                                   relief=tk.FLAT, padx=14, pady=6,
-                                   font=('Segoe UI', 9, 'bold'), cursor='hand2',
-                                   state=tk.DISABLED)
-        self._btn_otp.pack(side=tk.LEFT, padx=(10, 0))
-
-        self._refresh_lb()
-
-    def _mk_btn(self, parent, text, cmd, bg=BG_CARD, fg=FG):
-        return tk.Button(parent, text=text, command=cmd, bg=bg, fg=fg,
-                         relief=tk.FLAT, padx=10, pady=5, font=('Segoe UI', 9),
-                         cursor='hand2', activebackground=bg, activeforeground=fg)
-
-    def _refresh_lb(self):
-        ids, active, _ = _get_ids()
-        self._lb.delete(0, tk.END)
-        for i, pid in enumerate(ids):
-            marker = '▶ ' if pid == active else '   '
-            self._lb.insert(tk.END, f'{marker}{pid[:8]}…{pid[-4:]}')
-            self._lb.itemconfig(i, fg=GREEN if pid == active else FG)
-
-    def _show_full_id(self, event):
-        ids, _, _ = _get_ids()
-        idx = self._lb.nearest(event.y)
-        if 0 <= idx < len(ids):
-            messagebox.showinfo('Full Photographer ID', ids[idx])
-
-    def _selected_pid(self) -> str | None:
-        ids, _, _ = _get_ids()
-        sel = self._lb.curselection()
-        if not sel or sel[0] >= len(ids):
-            return None
-        return ids[sel[0]]
-
-    def _set_active(self):
-        pid = self._selected_pid()
-        if not pid:
-            return
-        ids, _, identities = _get_ids()
-        _save_ids(ids, pid, identities)
-        self._refresh_lb()
-        messagebox.showinfo('Active Set',
-            f'Active photographer:\n{pid[:8]}…{pid[-4:]}\n\nRestart the node to apply.')
-
-    def _unlink(self):
-        pid = self._selected_pid()
-        if not pid:
-            return
-        if not messagebox.askyesno('Unlink', f'Remove {pid[:8]}…{pid[-4:]}?'):
-            return
-        ids, active, identities = _get_ids()
-        ids = [i for i in ids if i != pid]
-        identities.pop(pid, None)
-        new_active = ids[0] if ids else ''
-        if active == pid:
-            active = new_active
-        _save_ids(ids, active, identities)
-        self._refresh_lb()
-
-    def _logout_all(self):
-        if not messagebox.askyesno('Logout All',
-                'Remove all linked photographers and node credentials?'):
-            return
-        _save_ids([], '', {})
-        self._refresh_lb()
-
-    def _on_otp_type(self, *_):
-        raw = self._otp_var.get()
-        clean = ''.join(c for c in raw if c.isdigit())[:6]
-        if clean != raw:
-            self._otp_var.set(clean)
-        self._btn_otp.configure(state=tk.NORMAL if len(clean) == 6 else tk.DISABLED)
-
-    def _link_via_id(self):
-        pid = self._id_entry.get().strip()
-        if not pid:
-            messagebox.showwarning('Empty', 'Enter a Photographer ID.')
-            return
-        self._do_link(pid)
-
-    def _link_via_otp(self):
-        otp = self._otp_var.get().strip()
-        if len(otp) != 6:
-            return
-        def task():
-            try:
-                pid = _resolve_otp(otp)
-                self.root.after(0, lambda: self._do_link(pid, clear_otp=True))
-            except ValueError as e:
-                self.root.after(0, lambda: messagebox.showerror('Invalid Code', str(e)))
-            except ConnectionError as e:
-                self.root.after(0, lambda: messagebox.showerror('Connection Error', str(e)))
-        threading.Thread(target=task, daemon=True).start()
-
-    def _do_link(self, photographer_id: str, clear_otp: bool = False):
-        def task():
-            try:
-                node_id, node_token = _register_node(photographer_id)
-                def finish():
-                    ids, active, identities = _get_ids()
-                    if photographer_id not in ids:
-                        ids.append(photographer_id)
-                    identities[photographer_id] = {'node_id': node_id, 'node_token': node_token}
-                    _save_ids(ids, photographer_id, identities)
-                    self._id_entry.delete(0, tk.END)
-                    if clear_otp:
-                        self._otp_var.set('')
-                    self._refresh_lb()
-                    messagebox.showinfo('Linked!',
-                        f'Linked to:\n{photographer_id[:8]}…{photographer_id[-4:]}\n\n'
-                        'Start the node (Run.bat) to begin processing photos.')
-                self.root.after(0, finish)
-            except (ValueError, ConnectionError) as e:
-                self.root.after(0, lambda: messagebox.showerror('Failed', str(e)))
-        threading.Thread(target=task, daemon=True).start()
-
     # ── Uninstall tab ─────────────────────────────────────────────────────────
 
     def _make_check_row(self, parent: tk.Frame, var: tk.BooleanVar,
                         label: str, hint: str):
-        """Custom dark-mode toggle row (avoids Checkbutton selectcolor rendering bug)."""
         row = tk.Frame(parent, bg=BG_CARD, padx=12, pady=7, cursor='hand2')
         row.pack(fill=tk.X)
 
@@ -816,9 +524,9 @@ class InstallerApp:
             (self._un_shortcut, 'Remove auto-start shortcut',
              'Removes AIPIXQR Node from Windows Startup'),
             (self._un_stop,     'Stop running node process',
-             'Terminates the background node if currently running'),
+             'Terminates the background runner if currently running'),
             (self._un_creds,    'Clear photographer credentials',
-             'Deletes node_config.json — all linked IDs will be lost'),
+             'Deletes node_config.json — all logged-in accounts will be removed'),
             (self._un_models,   'Delete AI models  (~40 MB)',
              'Removes the models/ directory'),
             (self._un_venv,     'Delete virtual environment  (~500 MB)',
@@ -876,9 +584,9 @@ class InstallerApp:
         def ui(fn): self.root.after(0, fn)
         def log(msg, c=FG_MUTED): ui(lambda: self._ulog(msg, c))
 
-        # ── Stop running node
+        runner_was_stopped = False
         if self._un_stop.get():
-            log('Stopping node process…')
+            log('Stopping runner process…')
             try:
                 stopped = False
                 if VENV_PYTHON.exists():
@@ -886,7 +594,7 @@ class InstallerApp:
                         [str(VENV_PYTHON), '-c',
                          'import psutil;'
                          'procs=[p for p in psutil.process_iter(["pid","cmdline"])'
-                         ' if any("main.py" in c for c in (p.info.get("cmdline") or []))'
+                         ' if any("Runner.py" in c for c in (p.info.get("cmdline") or []))'
                          ' and any("python" in c.lower() for c in (p.info.get("cmdline") or []))];'
                          '[p.terminate() for p in procs];print(len(procs))'],
                         capture_output=True, text=True, timeout=10,
@@ -898,17 +606,17 @@ class InstallerApp:
                     for p in psutil.process_iter(['pid', 'cmdline']):
                         try:
                             cmd = p.info.get('cmdline') or []
-                            if any('main.py' in c for c in cmd) and any('python' in c.lower() for c in cmd):
+                            if any('Runner.py' in c for c in cmd) and any('python' in c.lower() for c in cmd):
                                 p.terminate()
                                 stopped = True
                         except Exception:
                             pass
-                log('Node stopped' if stopped else 'Node was not running',
+                log('Runner stopped' if stopped else 'Runner was not running',
                     GREEN if stopped else FG_MUTED)
+                runner_was_stopped = stopped
             except Exception as e:
-                log(f'Could not stop node: {e}', AMBER)
+                log(f'Could not stop runner: {e}', AMBER)
 
-        # ── Remove startup shortcut
         if self._un_shortcut.get():
             startup_dir = os.path.join(
                 os.environ.get('APPDATA', ''),
@@ -924,7 +632,6 @@ class InstallerApp:
             else:
                 log('Startup shortcut not found — skipping', FG_MUTED)
 
-        # ── Clear credentials
         if self._un_creds.get():
             if CONFIG_PATH.exists():
                 try:
@@ -935,7 +642,6 @@ class InstallerApp:
             else:
                 log('No credentials file found — skipping', FG_MUTED)
 
-        # ── Delete AI models
         if self._un_models.get():
             if MODELS_DIR.exists():
                 pending = _rmtree_robust(str(MODELS_DIR))
@@ -946,10 +652,12 @@ class InstallerApp:
             else:
                 log('Models directory not found — skipping', FG_MUTED)
 
-        # ── Delete venv
         if self._un_venv.get():
             venv_dir = BASE_DIR / 'venv'
             if venv_dir.exists():
+                # Give Windows 2 s to release .pyd file handles after the runner terminates.
+                if runner_was_stopped:
+                    time.sleep(2)
                 pending = _rmtree_robust(str(venv_dir))
                 if pending:
                     log(f'venv mostly deleted — {len(pending)} locked file(s) queued for next reboot', AMBER)

@@ -137,7 +137,7 @@ class FolderWatcher:
         watch = self._observer.schedule(self._handler, str(folder_path), recursive=True)
         self._watches[path] = watch
         self._folder_info[path] = folder_info
-        logger.info(f'  👁 Watching [{folder_info["pool_type"]}]: {path}')
+        logger.info(f'  Watching: {Path(path).name}')
 
         # Process any photos already in the folder
         self._scan_existing(folder_info)

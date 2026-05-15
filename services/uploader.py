@@ -94,11 +94,9 @@ class PhotoUploader:
             result = self.api.upload_complete(photo_id, file_size, width, height)
             status = result.get('status', '?')
             if status == 'vectorized':
-                logger.info(f'  Done: {path.name} [{pool_type}] — public, no face scan')
+                logger.info(f'  Done: {path.name}')
             else:
-                assigned = result.get('assigned_to')
-                suffix = f' → node {assigned[:8]}' if assigned else ' (pending assignment)'
-                logger.info(f'  Done: {path.name} [{pool_type}] — queued for vectorization{suffix}')
+                logger.info(f'  Done: {path.name} — queued for processing')
 
         except Exception as e:
             logger.error(f'  Failed to process {path.name}: {e}')
