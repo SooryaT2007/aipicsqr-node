@@ -586,36 +586,52 @@ class InstallerApp:
 
         runner_was_stopped = False
         if self._un_stop.get():
-            log('Stopping runner process…')
+            log('Stopping node processes…')
             try:
-                stopped = False
-                if VENV_PYTHON.exists():
+                import psutil as _psutil
+                _have_psutil = True
+            except ImportError:
+                _have_psutil = False
+
+            def _kill_by_script(script_name: str) -> bool:
+                """Terminate any python process whose cmdline contains script_name."""
+                killed = False
+                if _have_psutil:
+                    for p in _psutil.process_iter(['pid', 'cmdline']):
+                        try:
+                            cmd = p.info.get('cmdline') or []
+                            if (any(script_name in c for c in cmd) and
+                                    any('python' in c.lower() for c in cmd)):
+                                p.terminate()
+                                killed = True
+                        except Exception:
+                            pass
+                elif VENV_PYTHON.exists():
                     r = subprocess.run(
                         [str(VENV_PYTHON), '-c',
-                         'import psutil;'
-                         'procs=[p for p in psutil.process_iter(["pid","cmdline"])'
-                         ' if any("Runner.py" in c for c in (p.info.get("cmdline") or []))'
-                         ' and any("python" in c.lower() for c in (p.info.get("cmdline") or []))];'
-                         '[p.terminate() for p in procs];print(len(procs))'],
+                         f'import psutil;'
+                         f'procs=[p for p in psutil.process_iter(["pid","cmdline"])'
+                         f' if any("{script_name}" in c for c in (p.info.get("cmdline") or []))'
+                         f' and any("python" in c.lower() for c in (p.info.get("cmdline") or []))];'
+                         f'[p.terminate() for p in procs];print(len(procs))'],
                         capture_output=True, text=True, timeout=10,
                     )
                     count = r.stdout.strip()
-                    stopped = count.isdigit() and int(count) > 0
-                else:
-                    import psutil
-                    for p in psutil.process_iter(['pid', 'cmdline']):
-                        try:
-                            cmd = p.info.get('cmdline') or []
-                            if any('Runner.py' in c for c in cmd) and any('python' in c.lower() for c in cmd):
-                                p.terminate()
-                                stopped = True
-                        except Exception:
-                            pass
-                log('Runner stopped' if stopped else 'Runner was not running',
-                    GREEN if stopped else FG_MUTED)
-                runner_was_stopped = stopped
+                    killed = count.isdigit() and int(count) > 0
+                return killed
+
+            try:
+                runner_stopped = _kill_by_script('Runner.py')
+                app_stopped    = _kill_by_script('APP.py')
+                runner_was_stopped = runner_stopped or app_stopped
+                if runner_stopped:
+                    log('Runner stopped', GREEN)
+                if app_stopped:
+                    log('APP stopped', GREEN)
+                if not runner_stopped and not app_stopped:
+                    log('No node processes were running', FG_MUTED)
             except Exception as e:
-                log(f'Could not stop runner: {e}', AMBER)
+                log(f'Could not stop processes: {e}', AMBER)
 
         if self._un_shortcut.get():
             startup_dir = os.path.join(
@@ -666,9 +682,11 @@ class InstallerApp:
             else:
                 log('venv not found — skipping', FG_MUTED)
 
-        log('Done.', GREEN)
-        ui(lambda: self._btn_uninstall.configure(state=tk.NORMAL, text='Uninstall Selected'))
+        log('Done. Closing in 5 seconds — then you can delete this folder.', GREEN)
+        ui(lambda: self._btn_uninstall.configure(state=tk.DISABLED, text='Done'))
         ui(self._check_initial_state)
+        time.sleep(5)
+        ui(self.root.destroy)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
