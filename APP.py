@@ -20,7 +20,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 try:
     import psutil
@@ -28,12 +28,13 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
-BASE_DIR     = Path(__file__).parent
-CONFIG_PATH  = BASE_DIR / 'node_config.json'
-LOG_DIR      = BASE_DIR / 'logs'
-RUNNER_PY    = BASE_DIR / 'Runner.py'
-VENV_PYTHONW = BASE_DIR / 'venv' / 'Scripts' / 'pythonw.exe'
-API_BASE     = 'https://dashboard.aipicsqr.com'
+BASE_DIR        = Path(__file__).parent
+CONFIG_PATH     = BASE_DIR / 'node_config.json'
+LOG_DIR         = BASE_DIR / 'logs'
+RUNNER_PY       = BASE_DIR / 'Runner.py'
+VENV_PYTHONW    = BASE_DIR / 'venv' / 'Scripts' / 'pythonw.exe'
+API_BASE        = 'https://dashboard.aipicsqr.com'
+NODE_SERVER_URL = 'http://127.0.0.1:19432'
 
 BG       = '#1c1917'
 BG_CARD  = '#292524'
@@ -103,6 +104,26 @@ def _api_post(path: str, body: dict) -> dict:
             return {'_status': e.code, 'error': raw.decode('utf-8', 'replace')}
     except Exception as exc:
         raise ConnectionError(str(exc))
+
+def _ipc_get(path: str) -> dict | None:
+    """Call the local NodeServer (Runner IPC). Returns None if Runner is not up."""
+    try:
+        req = urllib.request.Request(f'{NODE_SERVER_URL}{path}')
+        with urllib.request.urlopen(req, timeout=1) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+def _ipc_post(path: str, body: dict) -> dict | None:
+    try:
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            f'{NODE_SERVER_URL}{path}', data=data,
+            headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
 
 def _local_ip() -> str:
     try:
@@ -191,6 +212,10 @@ class NodeApp:
 
         self._log_pos        = 0
         self._runner_running = False
+        self._upload_stats: dict = {}
+        self._uploads_popup: tk.Toplevel | None = None
+        self._popup_filter  = 'all'
+        self._popup_offset  = 0
 
         self._apply_style()
         self._build_header()
@@ -200,11 +225,14 @@ class NodeApp:
 
         self._tab_account = tk.Frame(nb, bg=BG)
         self._tab_logs    = tk.Frame(nb, bg=BG)
+        self._tab_uploads = tk.Frame(nb, bg=BG)
         nb.add(self._tab_account, text='  Account  ')
         nb.add(self._tab_logs,    text='  Logs  ')
+        nb.add(self._tab_uploads, text='  Uploads  ')
 
         self._build_account_tab()
         self._build_logs_tab()
+        self._build_uploads_tab()
 
         threading.Thread(target=self._bg_loop, daemon=True).start()
 
@@ -422,6 +450,222 @@ class NodeApp:
                 self.root.after(0, lambda: messagebox.showerror('Failed', str(e)))
         threading.Thread(target=task, daemon=True).start()
 
+    # ── Uploads tab ───────────────────────────────────────────────────────────
+
+    def _build_uploads_tab(self):
+        f = self._tab_uploads
+
+        # Summary card
+        card = tk.Frame(f, bg=BG_CARD, padx=16, pady=14)
+        card.pack(fill=tk.X, padx=12, pady=(12, 6))
+
+        self._lbl_stats = tk.Label(
+            card, text='Runner not running', bg=BG_CARD, fg=FG_MUT,
+            font=('Segoe UI', 10))
+        self._lbl_stats.pack(anchor=tk.W)
+
+        prog_wrap = tk.Frame(card, bg=FG_DIM, height=6)
+        prog_wrap.pack(fill=tk.X, pady=(8, 4))
+        self._prog_fill = tk.Frame(prog_wrap, bg=BLUE, height=6)
+        self._prog_fill.place(x=0, y=0, relheight=1, relwidth=0)
+
+        btn_row = tk.Frame(card, bg=BG_CARD)
+        btn_row.pack(fill=tk.X, pady=(10, 0))
+        self._mk_btn(btn_row, '  Import Folder', self._import_folder,
+                     bg=BLUE_D, fg='white').pack(side=tk.LEFT, padx=(0, 8))
+        self._mk_btn(btn_row, 'View All Uploads ↗', self._open_uploads_popup,
+                     bg=BG_CARD).pack(side=tk.LEFT)
+
+        # Recent activity list
+        tk.Label(f, text='Recent uploads', bg=BG, fg=FG_MUT,
+                 font=('Segoe UI', 9)).pack(anchor=tk.W, padx=14, pady=(6, 2))
+
+        wrap = tk.Frame(f, bg=BG_LOG, bd=1, relief=tk.SUNKEN)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        self._recent_txt = tk.Text(
+            wrap, bg=BG_LOG, fg=FG, font=('Consolas', 9),
+            state=tk.DISABLED, wrap=tk.NONE, pady=4, padx=8)
+        vsb = tk.Scrollbar(wrap, command=self._recent_txt.yview)
+        self._recent_txt.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._recent_txt.pack(fill=tk.BOTH, expand=True)
+        self._recent_txt.tag_configure('ok',     foreground=GREEN)
+        self._recent_txt.tag_configure('failed', foreground=RED)
+        self._recent_txt.tag_configure('muted',  foreground=FG_MUT)
+
+    def _update_uploads_tab(self, stats: dict):
+        queued    = stats.get('queue_depth', 0)
+        active    = stats.get('active', 0)
+        done      = stats.get('completed_today', 0)
+        failed    = stats.get('failed_today', 0)
+        speed     = stats.get('speed_per_min', 0)
+        eta       = stats.get('eta_seconds')
+
+        total = done + failed + queued + active
+        pct   = done / total if total > 0 else 0
+
+        eta_str = ''
+        if eta is not None and eta > 0:
+            eta_str = f'  ·  ~{eta}s remaining'
+        elif speed > 0:
+            eta_str = f'  ·  {speed}/min'
+
+        label = f'Queued: {queued}  ·  Uploading: {active}  ·  Done: {done}  ·  Failed: {failed}{eta_str}'
+        self._lbl_stats.configure(text=label, fg=FG)
+        self._prog_fill.place(relwidth=min(1.0, pct))
+
+        # Update recent list
+        recent = stats.get('recent', [])[:20]
+        self._recent_txt.configure(state=tk.NORMAL)
+        self._recent_txt.delete('1.0', tk.END)
+        for item in recent:
+            name   = item.get('name', '?')
+            status = item.get('status', '?')
+            size   = item.get('size_kb', 0)
+            tag    = 'ok' if status == 'complete' else 'failed' if status == 'failed' else 'muted'
+            badge  = '✓' if status == 'complete' else '✗' if status == 'failed' else '…'
+            self._recent_txt.insert(tk.END, f'  {badge}  {name:<40}  {size:>5} KB\n', tag)
+        self._recent_txt.configure(state=tk.DISABLED)
+
+        # Refresh popup if open
+        if self._uploads_popup and self._uploads_popup.winfo_exists():
+            self._refresh_popup(stats)
+
+    def _import_folder(self):
+        folder = filedialog.askdirectory(title='Select folder to import')
+        if not folder:
+            return
+
+        cfg = _read_config()
+        event_id = cfg.get('event_id', '')
+        if not event_id:
+            messagebox.showwarning('No Event', 'No active event set. Add a folder via the Dashboard first.')
+            return
+
+        result = _ipc_post('/import-once', {
+            'folder_path': folder,
+            'event_id':    event_id,
+            'pool_type':   'public',
+        })
+        if result is None:
+            messagebox.showerror('Runner not reachable',
+                'The Runner is not running or is not responding on port 19432.\n'
+                'Start the Runner first.')
+            return
+
+        count = result.get('queued', 0)
+        name  = Path(folder).name
+        self._append_log(f'[APP] Import queued: {name} ({count} photos)', FG_MUT)
+        messagebox.showinfo('Import Queued', f'{count} photo(s) from "{name}" added to the upload queue.')
+
+    def _open_uploads_popup(self):
+        if self._uploads_popup and self._uploads_popup.winfo_exists():
+            self._uploads_popup.lift()
+            return
+
+        popup = tk.Toplevel(self.root)
+        popup.title('All Uploads')
+        popup.geometry('680x500')
+        popup.minsize(520, 380)
+        popup.configure(bg=BG)
+        self._uploads_popup  = popup
+        self._popup_offset   = 0
+
+        try:
+            popup.iconbitmap(str(BASE_DIR / 'icon.ico'))
+        except Exception:
+            pass
+
+        # Filter tabs
+        tab_row = tk.Frame(popup, bg=BG_CARD)
+        tab_row.pack(fill=tk.X)
+        self._popup_filter_btns = {}
+        for label in ('all', 'complete', 'uploading', 'failed', 'queued'):
+            btn = tk.Button(
+                tab_row, text=label.capitalize(),
+                bg=BG if label == 'all' else BG_CARD,
+                fg=FG if label == 'all' else FG_MUT,
+                relief=tk.FLAT, padx=14, pady=6,
+                font=('Segoe UI', 9), cursor='hand2',
+                command=lambda l=label: self._set_popup_filter(l))
+            btn.pack(side=tk.LEFT)
+            self._popup_filter_btns[label] = btn
+        self._popup_filter = 'all'
+
+        # List area
+        wrap = tk.Frame(popup, bg=BG_LOG, bd=1, relief=tk.SUNKEN)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
+        self._popup_txt = tk.Text(
+            wrap, bg=BG_LOG, fg=FG, font=('Consolas', 9),
+            state=tk.DISABLED, wrap=tk.NONE, pady=4, padx=8)
+        vsb = tk.Scrollbar(wrap, command=self._popup_txt.yview)
+        self._popup_txt.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._popup_txt.pack(fill=tk.BOTH, expand=True)
+        self._popup_txt.tag_configure('ok',     foreground=GREEN)
+        self._popup_txt.tag_configure('failed', foreground=RED)
+        self._popup_txt.tag_configure('muted',  foreground=FG_MUT)
+        self._popup_txt.tag_configure('active', foreground=BLUE)
+
+        btn_bar = tk.Frame(popup, bg=BG, pady=6)
+        btn_bar.pack(fill=tk.X, padx=8)
+        self._btn_load_more = self._mk_btn(btn_bar, 'Load more', self._popup_load_more)
+        self._btn_load_more.pack(side=tk.LEFT)
+        self._mk_btn(btn_bar, 'Close', popup.destroy, fg=FG_MUT).pack(side=tk.RIGHT)
+
+        self._refresh_popup(self._upload_stats)
+
+    def _set_popup_filter(self, filt: str):
+        self._popup_filter = filt
+        self._popup_offset = 0
+        for lbl, btn in self._popup_filter_btns.items():
+            btn.configure(bg=BG if lbl == filt else BG_CARD,
+                          fg=FG if lbl == filt else FG_MUT)
+        self._refresh_popup(self._upload_stats)
+
+    def _popup_load_more(self):
+        self._popup_offset += 100
+        self._refresh_popup(self._upload_stats, append=True)
+
+    def _refresh_popup(self, stats: dict, append: bool = False):
+        if not (self._uploads_popup and self._uploads_popup.winfo_exists()):
+            return
+        recent = stats.get('recent', [])
+        filt   = self._popup_filter
+
+        if filt != 'all':
+            # 'uploading' maps to status active/processing; others match directly
+            if filt == 'uploading':
+                filtered = [r for r in recent if r.get('status') in ('active', 'uploading')]
+            else:
+                filtered = [r for r in recent if r.get('status') == filt]
+        else:
+            filtered = recent
+
+        page = filtered[self._popup_offset: self._popup_offset + 100]
+
+        self._popup_txt.configure(state=tk.NORMAL)
+        if not append:
+            self._popup_txt.delete('1.0', tk.END)
+
+        for item in page:
+            name   = item.get('name', '?')
+            status = item.get('status', '?')
+            size   = item.get('size_kb', 0)
+            if status == 'complete':
+                tag, badge = 'ok', '✓'
+            elif status == 'failed':
+                tag, badge = 'failed', '✗'
+            elif status in ('active', 'uploading'):
+                tag, badge = 'active', '↑'
+            else:
+                tag, badge = 'muted', '…'
+            self._popup_txt.insert(tk.END, f'  {badge}  {name:<44}  {size:>5} KB\n', tag)
+
+        self._popup_txt.configure(state=tk.DISABLED)
+        has_more = (self._popup_offset + 100) < len(filtered)
+        self._btn_load_more.configure(state=tk.NORMAL if has_more else tk.DISABLED)
+
     # ── Logs tab ──────────────────────────────────────────────────────────────
 
     def _build_logs_tab(self):
@@ -539,9 +783,21 @@ class NodeApp:
                     self._runner_running = running
                     self.root.after(0, lambda r=running: self._update_status(r))
                 self._poll_log()
+                self._poll_upload_stats()
             except Exception:
                 pass
             time.sleep(1.5)
+
+    def _poll_upload_stats(self):
+        stats = _ipc_get('/stats')
+        if stats:
+            self._upload_stats = stats
+            self.root.after(0, lambda s=stats: self._update_uploads_tab(s))
+        elif self._upload_stats:
+            # Runner went away — reset display
+            self._upload_stats = {}
+            self.root.after(0, lambda: self._lbl_stats.configure(
+                text='Runner not running', fg=FG_MUT))
 
     def _update_status(self, running: bool):
         if running:

@@ -141,11 +141,16 @@ class ResourceMonitor:
 
     def get_status(self) -> dict:
         """Current runtime status for telemetry — includes live + static specs."""
+        specs = self._get_system_specs()
+        total = specs.get('total_ram_mb') or 0
+        avail = specs.get('available_ram_mb') or 0
+        free_pct = round(avail / total * 100, 1) if total > 0 else 0.0
         return {
-            'cpu_percent': int(self._cpu_percent),
-            'cpu_temp':    round(self._cpu_temp, 1),
-            'paused':      self._paused,
-            **self._get_system_specs(),
+            'cpu_percent':     int(self._cpu_percent),
+            'cpu_temp':        round(self._cpu_temp, 1),
+            'paused':          self._paused,
+            'free_ram_percent': free_pct,
+            **specs,
         }
 
     def _get_system_specs(self) -> dict:

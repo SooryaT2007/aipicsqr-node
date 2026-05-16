@@ -7,7 +7,8 @@ Supports multiple linked photographer IDs; one is active at a time.
 import json
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).parent / 'node_config.json'
+BASE_DIR     = Path(__file__).parent
+CONFIG_PATH  = BASE_DIR / 'node_config.json'
 API_BASE_URL = 'https://dashboard.aipicsqr.com'
 
 
@@ -40,6 +41,14 @@ class Config:
         self.max_cpu_percent = 90
         self.max_cpu_temp = 85.0
         self.cooldown_period = 30
+
+        # Parallel upload engine
+        self.upload_workers       = 6
+        self.upload_batch_size    = 10
+        self.upload_batch_timeout = 5.0
+        self.upload_state_db      = str(BASE_DIR / 'upload_state.db')
+        self.upload_stats_file    = str(BASE_DIR / 'upload_stats.json')
+        self.node_server_port     = 19432
 
         # Telemetry
         self.pulse_interval = 60

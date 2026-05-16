@@ -87,19 +87,20 @@ class APIClient:
     def pulse(self, resource_status: dict) -> dict:
         payload = {
             **self._auth(),
-            'node_id':        self._config.node_id,
-            'photographer_id': self._config.photographer_id,
-            'hostname':       socket.gethostname(),
-            'ip_address':     self._local_ip(),
-            'cpu_percent':    resource_status.get('cpu_percent', 0),
-            'cpu_temp':       resource_status.get('cpu_temp', 0),
-            'status':         'busy' if resource_status.get('paused') else 'online',
-            # Extended hardware specs
-            'total_ram_mb':     resource_status.get('total_ram_mb'),
-            'available_ram_mb': resource_status.get('available_ram_mb'),
-            'cpu_cores':        resource_status.get('cpu_cores'),
-            'cpu_threads':      resource_status.get('cpu_threads'),
-            'cpu_freq_mhz':     resource_status.get('cpu_freq_mhz'),
+            'node_id':           self._config.node_id,
+            'photographer_id':   self._config.photographer_id,
+            'hostname':          socket.gethostname(),
+            'ip_address':        self._local_ip(),
+            'cpu_temp':          resource_status.get('cpu_temp', 0),
+            'status':            'busy' if resource_status.get('paused') else 'online',
+            # Hardware specs used for server-side performance scoring
+            'total_ram_mb':      resource_status.get('total_ram_mb'),
+            'available_ram_mb':  resource_status.get('available_ram_mb'),
+            'cpu_cores':         resource_status.get('cpu_cores'),
+            'cpu_threads':       resource_status.get('cpu_threads'),
+            'cpu_freq_mhz':      resource_status.get('cpu_freq_mhz'),
+            # Upload load signal — server applies upload penalty to score
+            'upload_queue_depth': resource_status.get('upload_queue_depth', 0),
         }
         resp = self._post(
             f'{self._config.api_base_url}/api/nodes/pulse',
@@ -182,12 +183,12 @@ class APIClient:
         file_size: int,
         width: int,
         height: int,
+        thumbnail_key: str | None = None,
+        thumbnail_url: str | None = None,
     ) -> dict:
         """
-        Notify the server that the photo has been uploaded to R2.
-        The server marks it done (public pool) or creates a vectoring_job
-        assigned to the highest-score online node (private pool).
-        Face detection is never done by the uploading node.
+        Notify the server that a single photo has been uploaded to R2.
+        For bulk uploads prefer upload_complete_batch() to reduce Vercel invocations.
         """
         payload = {
             **self._auth(),
@@ -195,11 +196,29 @@ class APIClient:
             'file_size_bytes': file_size,
             'width':           width,
             'height':          height,
+            'thumbnail_key':   thumbnail_key,
+            'thumbnail_url':   thumbnail_url,
         }
         resp = self._post(
             f'{self._config.api_base_url}/api/node/upload/complete',
             json=payload,
             timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def upload_complete_batch(self, photos: list[dict]) -> dict:
+        """
+        Notify the server that multiple photos have been uploaded to R2.
+        photos: list of dicts with photo_id, file_size_bytes, width, height,
+                thumbnail_key (optional), thumbnail_url (optional).
+        Max 50 per call.
+        """
+        payload = {**self._auth(), 'photos': photos}
+        resp = self._post(
+            f'{self._config.api_base_url}/api/node/upload/complete-batch',
+            json=payload,
+            timeout=30,
         )
         resp.raise_for_status()
         return resp.json()
