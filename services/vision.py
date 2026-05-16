@@ -1,302 +1,260 @@
 """
-Vision Service - Face Detection & Recognition
+Vision Service — Face Detection & Recognition
 ===============================================
-Core facial recognition pipeline using:
-- YuNet (cv2.FaceDetectorYN) for face detection
-- SFace (cv2.FaceRecognizerSF) for face recognition / embedding
+Pipeline:
+  Image → Resize(640×480) → Detect(YuNet) → Crop(Original) → Recognize(SFace) → 128-dim Vector
 
-Both models are Apache 2.0 / MIT licensed and commercially safe.
-This module runs in an isolated process to not interfere with
-YT/LED live streams.
+Why 640×480 is fixed
+─────────────────────
+YuNet's internal anchor grid is stride-based. The image height must be a
+multiple of 32 for the feature maps to align correctly. If setInputSize is
+called with a non-conforming height (e.g. 360 from 3840×2160 aspect-ratio
+resize) the detector returns None immediately without running inference.
 
-Pipeline: Image â†’ Resize(640px) â†’ Detect(YuNet) â†’ Crop(Original) â†’ Recognize(SFace) â†’ 512-dim Vector
+The safest approach: always feed exactly 640×480 (the training resolution).
+Track separate x/y scale factors to map detected bboxes and landmarks back
+to the original image coordinates for high-resolution SFace alignment.
 """
 
 import cv2
-import numpy as np
 import logging
+import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 logger = logging.getLogger('AIPICSQR-node')
 
+_DETECT_W = 640
+_DETECT_H = 480  # must be a multiple of 32; matches YuNet training resolution
 
 try:
     import onnxruntime as ort
-    _onnxruntime_openvino_available = any(
-        provider.startswith('OpenVINO')
-        for provider in ort.get_available_providers()
+    _openvino_available = any(
+        p.startswith('OpenVINO') for p in ort.get_available_providers()
     )
 except Exception:
     ort = None  # type: ignore[assignment]
-    _onnxruntime_openvino_available = False
+    _openvino_available = False
 
 
 class VisionService:
-    """
-    Face detection and recognition using YuNet + SFace.
-    
-    Both models are loaded from ONNX files and run purely on CPU
-    using OpenCV's DNN backend, so no external ONNX runtime dependency
-    is required for normal operation.
-    """
+    """Face detection (YuNet) and recognition (SFace) using OpenCV DNN."""
 
     def __init__(self, models_dir: str):
         self.models_dir = Path(models_dir)
-        self._detector: Optional[cv2.FaceDetectorYN] = None
+        self._detector:   Optional[cv2.FaceDetectorYN]  = None
         self._recognizer: Optional[cv2.FaceRecognizerSF] = None
         self._initialized = False
 
     def initialize(self) -> bool:
-        """
-        Load the YuNet and SFace models.
-        
-        Returns:
-            True if both models loaded successfully.
-        """
         yunet_path = str(self.models_dir / 'face_detection_yunet_2023mar.onnx')
         sface_path = str(self.models_dir / 'face_recognition_sface_2021dec.onnx')
 
-        # Check model files exist
         if not Path(yunet_path).exists():
-            logger.error(f"YuNet model not found: {yunet_path}")
+            logger.error(f'YuNet model not found: {yunet_path}')
             return False
         if not Path(sface_path).exists():
-            logger.error(f"SFace model not found: {sface_path}")
+            logger.error(f'SFace model not found: {sface_path}')
             return False
 
         backend_id = cv2.dnn.DNN_BACKEND_OPENCV
-        target_id = cv2.dnn.DNN_TARGET_CPU
+        target_id  = cv2.dnn.DNN_TARGET_CPU
 
-        if _onnxruntime_openvino_available and hasattr(cv2.dnn, 'DNN_BACKEND_INFERENCE_ENGINE'):
+        if _openvino_available and hasattr(cv2.dnn, 'DNN_BACKEND_INFERENCE_ENGINE'):
             backend_id = cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE
-            logger.info('Optional onnxruntime-openvino support detected. Trying OpenVINO-backed inference engine.')
+            logger.info('OpenVINO backend detected — attempting accelerated inference')
 
-        def _create_model(factory, *args, **kwargs):
+        def _make(factory, *args, **kwargs):
             try:
                 return factory(*args, **kwargs)
-            except Exception as ex:
+            except Exception:
                 if backend_id != cv2.dnn.DNN_BACKEND_OPENCV:
-                    logger.warning(
-                        'OpenVINO backend is not supported by the current OpenCV build. Falling back to CPU backend.'
+                    logger.warning('OpenVINO backend failed; falling back to OpenCV CPU')
+                    return factory(
+                        *args,
+                        backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
+                        target_id=cv2.dnn.DNN_TARGET_CPU,
+                        **kwargs,
                     )
-                    return factory(*args, backend_id=cv2.dnn.DNN_BACKEND_OPENCV, target_id=cv2.dnn.DNN_TARGET_CPU, **kwargs)
                 raise
 
         try:
-            # Initialize YuNet face detector
-            self._detector = _create_model(
+            # Fixed input size matches training resolution — never changed at runtime.
+            self._detector = _make(
                 cv2.FaceDetectorYN.create,
                 model=yunet_path,
                 config='',
-                input_size=(640, 480),
+                input_size=(_DETECT_W, _DETECT_H),
                 score_threshold=0.5,
                 nms_threshold=0.3,
                 top_k=5000,
                 backend_id=backend_id,
                 target_id=target_id,
             )
-            logger.info(f"  âœ“ YuNet loaded: {yunet_path}")
+            logger.info(f'  ✔ YuNet loaded ({_DETECT_W}×{_DETECT_H}): {yunet_path}')
 
-            # Initialize SFace recognizer
-            self._recognizer = _create_model(
+            self._recognizer = _make(
                 cv2.FaceRecognizerSF.create,
                 model=sface_path,
                 config='',
                 backend_id=backend_id,
                 target_id=target_id,
             )
-            logger.info(f"  âœ“ SFace loaded: {sface_path}")
-
-            if backend_id == cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE:
-                logger.info('OpenVINO execution path enabled.')
-            else:
-                logger.info('Using OpenCV CPU inference fallback.')
+            logger.info(f'  ✔ SFace loaded: {sface_path}')
 
             self._initialized = True
             return True
 
         except Exception as e:
-            logger.error(f"Failed to initialize vision models: {e}")
+            logger.error(f'Failed to load vision models: {e}')
             return False
+
+    # ── Photo vectorization ────────────────────────────────────────────────────
 
     def process_image(self, image_path: str, confidence_threshold: float = 0.7) -> List[dict]:
         """
-        Process a single image: detect faces, generate embeddings.
-        
-        Args:
-            image_path: Path to the image file
-            confidence_threshold: Minimum face detection confidence
-        
-        Returns:
-            List of dicts with keys: embedding (512-dim), bbox, confidence
+        Detect faces in a photo and return 128-dim SFace embeddings.
+
+        Detection runs at fixed 640×480 to avoid YuNet's stride alignment
+        requirement. Bboxes/landmarks are mapped back to the original
+        resolution using per-axis scale factors before SFace alignment,
+        so embedding quality is not affected by the detection downscale.
         """
         if not self._initialized:
             if not self.initialize():
                 return []
 
-        # Read image
         original = cv2.imread(image_path)
         if original is None:
-            logger.error(f"  [photo] Could not read image: {image_path}")
+            logger.error(f'  [photo] Could not read image: {image_path}')
             return []
 
         orig_h, orig_w = original.shape[:2]
-        logger.info(f"  [photo] {Path(image_path).name}: {orig_w}x{orig_h} px")
+        logger.info(f'  [photo] {Path(image_path).name}: {orig_w}×{orig_h} px')
 
-        # â”€â”€ STEP 1: Resize for detection (YuNet expects smaller input) â”€â”€
-        detect_w = 640
-        scale = detect_w / orig_w
-        detect_h = int(orig_h * scale)
-        resized = cv2.resize(original, (detect_w, detect_h))
+        # Resize to detection resolution — separate scales per axis so that
+        # any aspect ratio works without changing the model's inputSize.
+        detect_img = cv2.resize(original, (_DETECT_W, _DETECT_H))
+        scale_x = orig_w / _DETECT_W
+        scale_y = orig_h / _DETECT_H
 
-        # Update detector input size
-        self._detector.setInputSize((detect_w, detect_h))
+        _, faces = self._detector.detect(detect_img)
 
-        # â”€â”€ STEP 2: Detect faces â”€â”€
-        _, faces = self._detector.detect(resized)
-
-        if faces is None:
-            logger.warning(f"  [photo] detector returned None for {Path(image_path).name}")
+        if faces is None or len(faces) == 0:
+            logger.info(f'  [photo] No faces detected in {Path(image_path).name}')
             return []
 
-        logger.info(f"  [photo] Raw candidates: {len(faces)}, conf_threshold={confidence_threshold}")
-        for i, f in enumerate(faces):
-            logger.info(f"    candidate[{i}] conf={f[-1]:.3f} w={int(f[2])} h={int(f[3])}")
-
-        if len(faces) == 0:
-            logger.info(f"  [photo] No candidates from detector for {Path(image_path).name}")
-            return []
+        logger.info(f'  [photo] {len(faces)} candidate(s), threshold={confidence_threshold}')
 
         results = []
-
         for face in faces:
-            face_confidence = float(face[-1])
-            if face_confidence < confidence_threshold:
-                logger.debug(f"    Skipping face conf={face_confidence:.3f} < threshold={confidence_threshold}")
+            confidence = float(face[-1])
+            if confidence < confidence_threshold:
                 continue
 
-            # â”€â”€ STEP 3: Scale bounding box back to original resolution â”€â”€
+            # Map detection bbox back to original resolution
             x, y, w, h = face[:4]
-            orig_x = int(x / scale)
-            orig_y = int(y / scale)
-            orig_face_w = int(w / scale)
-            orig_face_h = int(h / scale)
+            orig_x = int(x * scale_x)
+            orig_y = int(y * scale_y)
+            orig_w_ = int(w * scale_x)
+            orig_h_ = int(h * scale_y)
 
-            # Scale landmarks back to original resolution
-            face_for_align = face.copy()
-            # Landmarks are at indices 4-13 (5 points Ã— 2 coords)
-            for i in range(4, 14):
-                if i % 2 == 0:  # x coordinates
-                    face_for_align[i] = face[i] / scale
-                else:  # y coordinates
-                    face_for_align[i] = face[i] / scale
-            # Also scale bbox
-            face_for_align[0] = orig_x
-            face_for_align[1] = orig_y
-            face_for_align[2] = orig_face_w
-            face_for_align[3] = orig_face_h
+            # Scale landmarks (indices 4–13: 5 points × x,y) back to original
+            face_orig = face.copy()
+            for i in range(4, 14, 2):   # x coords
+                face_orig[i]     = face[i]     * scale_x
+            for i in range(5, 14, 2):   # y coords
+                face_orig[i]     = face[i]     * scale_y
+            face_orig[0] = orig_x
+            face_orig[1] = orig_y
+            face_orig[2] = orig_w_
+            face_orig[3] = orig_h_
 
-            # â”€â”€ STEP 4: Align and crop face from ORIGINAL resolution â”€â”€
+            # Align and crop face from HIGH-RES original for best embedding quality
             try:
-                aligned_face = self._recognizer.alignCrop(original, face_for_align)
+                aligned = self._recognizer.alignCrop(original, face_orig)
             except Exception as e:
-                logger.debug(f"  Failed to align face: {e}")
+                logger.debug(f'  alignCrop failed: {e}')
                 continue
 
-            # â”€â”€ STEP 5: Generate 512-dim embedding â”€â”€
             try:
-                embedding = self._recognizer.feature(aligned_face)
-                embedding = embedding.flatten().tolist()
+                embedding = self._recognizer.feature(aligned).flatten().tolist()
             except Exception as e:
-                logger.debug(f"  Failed to extract features: {e}")
+                logger.debug(f'  feature extraction failed: {e}')
                 continue
 
             if len(embedding) < 64:
-                logger.warning(f"  Embedding too small ({len(embedding)}-dim), skipping")
+                logger.warning(f'  Embedding too small ({len(embedding)}-dim), skipping')
                 continue
 
             results.append({
-                'embedding': embedding,
-                'bbox': {
-                    'x': orig_x,
-                    'y': orig_y,
-                    'w': orig_face_w,
-                    'h': orig_face_h,
-                },
-                'confidence': face_confidence,
+                'embedding':  embedding,
+                'bbox':       {'x': orig_x, 'y': orig_y, 'w': orig_w_, 'h': orig_h_},
+                'confidence': confidence,
             })
 
-        logger.info(
-            f"  ðŸ§  {Path(image_path).name}: {len(results)} face(s) detected "
-            f"(out of {len(faces)} candidates)"
-        )
-
+        logger.info(f'  🧠 {Path(image_path).name}: {len(results)} face(s) extracted')
         return results
+
+    # ── Selfie embedding (guest face matching) ─────────────────────────────────
 
     def process_selfie(self, image_data: bytes) -> Optional[List[float]]:
         """
-        Process a selfie image and return the face embedding.
-        Used for guest face matching.
-        
-        Args:
-            image_data: Raw image bytes (JPEG/PNG)
-        
-        Returns:
-            512-dimensional embedding list, or None if no face found
+        Decode a selfie and return a 128-dim embedding for pgvector matching.
+        Detection runs at 640×480; alignment uses the original selfie pixels.
+        Returns None if no face is detected.
         """
         if not self._initialized:
             if not self.initialize():
                 return None
 
-        logger.info(f'  [selfie] Received {len(image_data):,} bytes')
+        logger.info(f'  [selfie] {len(image_data):,} bytes received')
 
-        # Decode image from bytes
         nparr = np.frombuffer(image_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is None:
-            logger.error('  [selfie] ❌ cv2.imdecode failed — bytes may be corrupt or not a valid image')
+            logger.error('  [selfie] Failed to decode image bytes')
             return None
 
-        h, w = img.shape[:2]
-        logger.info(f'  [selfie] Decoded image: {w}×{h} px, channels={img.shape[2] if img.ndim == 3 else 1}')
+        orig_h, orig_w = img.shape[:2]
+        logger.info(f'  [selfie] {orig_w}×{orig_h} px')
 
-        # Resize to 640px wide — same as process_image; YuNet anchors are tuned for this scale
-        detect_w = 640
-        scale = detect_w / w
-        detect_h = int(h * scale)
-        img_detect = cv2.resize(img, (detect_w, detect_h))
-        logger.info(f'  [selfie] Resized to {detect_w}×{detect_h} for YuNet (scale={scale:.3f})')
+        # Resize to detection resolution (same fixed size as process_image)
+        detect_img = cv2.resize(img, (_DETECT_W, _DETECT_H))
+        scale_x = orig_w / _DETECT_W
+        scale_y = orig_h / _DETECT_H
 
-        self._detector.setInputSize((detect_w, detect_h))
-        _, faces = self._detector.detect(img_detect)
+        _, faces = self._detector.detect(detect_img)
 
-        if faces is None:
-            logger.warning('  [selfie] ❌ detector.detect() returned None — possible model error')
+        if faces is None or len(faces) == 0:
+            logger.warning('  [selfie] No face detected — check lighting and framing')
             return None
 
-        logger.info(f'  [selfie] Raw detections: {len(faces)} candidate(s)')
-        for i, f in enumerate(faces):
-            logger.info(f'    face[{i}] bbox=({int(f[0])},{int(f[1])},{int(f[2])},{int(f[3])}) conf={f[-1]:.3f}')
+        logger.info(f'  [selfie] {len(faces)} candidate(s)')
 
-        if len(faces) == 0:
-            logger.warning('  [selfie] ❌ No faces detected — check lighting, framing, and selfie resolution')
-            return None
+        # Use the largest face (most likely the selfie subject)
+        largest = max(faces, key=lambda f: f[2] * f[3])
+        conf = float(largest[-1])
+        logger.info(f'  [selfie] Selected face: conf={conf:.3f}')
 
-        # Take the largest face (most likely the selfie subject)
-        largest_face = max(faces, key=lambda f: f[2] * f[3])
-        lf = largest_face
-        logger.info(f'  [selfie] Selected largest face: bbox=({int(lf[0])},{int(lf[1])},{int(lf[2])},{int(lf[3])}) conf={lf[-1]:.3f}')
+        # Scale landmarks back to original selfie resolution for alignment
+        face_orig = largest.copy()
+        x, y, w, h = largest[:4]
+        for i in range(4, 14, 2):
+            face_orig[i] = largest[i] * scale_x
+        for i in range(5, 14, 2):
+            face_orig[i] = largest[i] * scale_y
+        face_orig[0] = int(x * scale_x)
+        face_orig[1] = int(y * scale_y)
+        face_orig[2] = int(w * scale_x)
+        face_orig[3] = int(h * scale_y)
 
         try:
-            # Align and embed from the resized image (no need to scale back for selfies)
-            aligned = self._recognizer.alignCrop(img_detect, largest_face)
-            logger.info(f'  [selfie] alignCrop OK — aligned shape={aligned.shape}')
-            embedding = self._recognizer.feature(aligned)
-            emb_list = embedding.flatten().tolist()
-            logger.info(f'  [selfie] ✅ Embedding extracted: dim={len(emb_list)}, norm={float(np.linalg.norm(embedding)):.4f}')
-            return emb_list
+            aligned = self._recognizer.alignCrop(img, face_orig)
+            embedding = self._recognizer.feature(aligned).flatten().tolist()
+            logger.info(f'  [selfie] ✅ Embedding: {len(embedding)}-dim')
+            return embedding
         except Exception as e:
-            logger.error(f'  [selfie] ❌ alignCrop/feature failed: {e}')
+            logger.error(f'  [selfie] alignCrop/feature failed: {e}')
             return None
