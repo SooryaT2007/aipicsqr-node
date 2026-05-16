@@ -146,6 +146,7 @@ class MeshWorker:
 
     def _process_vectoring_job(self, job_id: str, photo_id: str, r2_url: str):
         logger.debug(f'Mesh: vectoring job {job_id[:8]}...')
+        start_time = time.time()
         try:
             self.api.claim_job(job_id)
 
@@ -168,9 +169,10 @@ class MeshWorker:
             finally:
                 os.unlink(tmp_path)
 
-            self.api.complete_job(job_id, photo_id, face_results or [])
+            processing_ms = int((time.time() - start_time) * 1000)
+            self.api.complete_job(job_id, photo_id, face_results or [], processing_ms=processing_ms)
             self._record_job_done()
-            logger.debug(f'Mesh: vectoring {job_id[:8]} done — {len(face_results or [])} face(s)')
+            logger.debug(f'Mesh: vectoring {job_id[:8]} done — {len(face_results or [])} face(s), {processing_ms} ms')
 
         except Exception as e:
             logger.error(f'  Mesh: vectoring {job_id[:8]} failed: {e}')

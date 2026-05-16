@@ -243,7 +243,13 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
-    def complete_job(self, job_id: str, photo_id: str, face_results: list) -> dict:
+    def complete_job(
+        self,
+        job_id: str,
+        photo_id: str,
+        face_results: list,
+        processing_ms: int = 0,
+    ) -> dict:
         face_vectors = [
             {
                 'embedding': f['embedding'],
@@ -254,8 +260,9 @@ class APIClient:
         ]
         payload = {
             **self._auth(),
-            'photo_id': photo_id,
-            'face_vectors': face_vectors,
+            'photo_id':      photo_id,
+            'face_vectors':  face_vectors,
+            'processing_ms': processing_ms if processing_ms > 0 else None,
         }
         resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs/{job_id}/complete',
