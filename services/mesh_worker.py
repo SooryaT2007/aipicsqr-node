@@ -1,32 +1,44 @@
 """
-Mesh Worker
-============
-Processes two job types dispatched by the server:
+Mesh Worker v2
+==============
+Buffer-based vectoring job processor using the server's pull_vector_tasks
+function (SKIP LOCKED). Replaces the old poll-then-claim pattern.
 
-  1. vectoring_jobs   — face detection + recognition on uploaded photos.
-     The server assigns each job to the highest-score online node, so the
-     node that uploaded the photo and the node that vectorizes it are
-     completely independent.
+Key behaviours (per system design):
 
-  2. face_search_jobs — selfie embedding for guest face-matching.
-     Same assignment logic: the highest-score node processes the guest
-     selfie regardless of which node is "nearby". This lets 100 guests
-     scan simultaneously across all online nodes.
+  Dynamic batching
+  ─────────────────
+  Batch size is derived from the server-assigned performance_score stored
+  in config (updated on every pulse):
+    score > 80  →  20 jobs per pull
+    score < 30  →   2 jobs per pull
+    else        →  linear interpolation
 
-Rate limiting
-─────────────
-Each node self-limits to a hardware-derived max-jobs-per-minute so a
-single laptop is never overloaded:
+  Parallel prefetch
+  ──────────────────
+  While the CPU vectorizes image N, images N+1 and N+2 are already being
+  downloaded from R2 in background threads. This hides the 1-2 MB network
+  transfer behind the ONNX inference time, so the node stays at near-100%
+  CPU utilization rather than stalling on downloads.
 
-    max_rpm = clamp(cpu_threads × (ram_gb / 8) × 2, min=2, max=120)
+  Buffer-driven polling
+  ──────────────────────
+  pull_vector_tasks is called only when the local buffer is empty — not on
+  a fixed timer. This avoids hammering the DB under load. When idle the
+  node polls every 2 s so urgent (priority=0) jobs are picked up quickly
+  without needing a separate Realtime connection.
 
-Examples:
-  4 threads / 8 GB  →   8 rpm
-  8 threads / 16 GB →  32 rpm
-  12 threads / 32 GB → 96 rpm
+  End-to-end timing
+  ──────────────────
+  Each job arrives with assigned_at (set atomically by pull_vector_tasks).
+  The node sends completed_at when it finishes, giving the server the full
+  pipeline time: download + vectorize + network send. The load balancer
+  uses this to route future work to the fastest nodes.
 
-Higher-spec machines naturally claim more jobs, making the mesh
-self-balancing without any central scheduler.
+  Selfie jobs (face_search_jobs)
+  ────────────────────────────────
+  Guest selfie matching remains in face_search_jobs and is polled
+  separately, always processed before bulk vectoring work.
 """
 
 import base64
@@ -36,11 +48,19 @@ import tempfile
 import threading
 import time
 from collections import deque
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 import requests
 
 logger = logging.getLogger('AIPICSQR-node')
+
+_PREFETCH_AHEAD   = 2     # jobs to download ahead while processing
+_IDLE_POLL_SECS   = 2     # poll interval when buffer is empty
+_DOWNLOAD_TIMEOUT = 60    # seconds for R2 download
+_PREFETCH_WAIT    = 120   # max seconds to wait for an in-flight download
+
+_PENDING = object()       # sentinel: download thread is in flight
 
 
 class MeshWorker:
@@ -51,11 +71,14 @@ class MeshWorker:
         self.resource_monitor = resource_monitor
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._poll_interval = 10
 
-        # Sliding 60-second window of job completion timestamps
-        self._job_window: deque[float] = deque()
-        self._rate_limit: Optional[int] = None  # cached on first call
+        # Claimed jobs waiting to be processed
+        self._buffer: deque[dict] = deque()
+        self._buffer_lock = threading.Lock()
+
+        # Download cache: job_id → bytes | _PENDING | b'' (failed download)
+        self._cache: dict[str, Any] = {}
+        self._cache_lock = threading.Lock()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -70,31 +93,16 @@ class MeshWorker:
             self._thread.join(timeout=10)
         logger.info('Mesh Worker stopped')
 
-    # ── Rate limiting ──────────────────────────────────────────────────────────
+    # ── Dynamic batch sizing ───────────────────────────────────────────────────
 
-    def _max_jobs_per_minute(self) -> int:
-        if self._rate_limit is not None:
-            return self._rate_limit
-        try:
-            import psutil
-            threads = psutil.cpu_count(logical=True) or 2
-            ram_gb = psutil.virtual_memory().total / (1024 ** 3)
-            rpm = int(threads * (ram_gb / 8) * 2)
-            self._rate_limit = max(2, min(rpm, 120))
-        except Exception:
-            self._rate_limit = 4
-        logger.debug(f'Mesh rate limit: {self._rate_limit} jobs/min')
-        return self._rate_limit
-
-    def _within_rate_limit(self) -> bool:
-        now = time.time()
-        cutoff = now - 60.0
-        while self._job_window and self._job_window[0] < cutoff:
-            self._job_window.popleft()
-        return len(self._job_window) < self._max_jobs_per_minute()
-
-    def _record_job_done(self):
-        self._job_window.append(time.time())
+    def _batch_size(self) -> int:
+        score = getattr(self.config, 'performance_score', 1)
+        if score > 80:
+            return 20
+        if score < 30:
+            return 2
+        # Linear: 2 at score=30, 20 at score=80
+        return max(2, round(2 + (score - 30) * 18 / 50))
 
     # ── Main loop ──────────────────────────────────────────────────────────────
 
@@ -102,63 +110,129 @@ class MeshWorker:
         while self._running:
             try:
                 if self.resource_monitor.should_pause():
-                    time.sleep(self._poll_interval)
+                    time.sleep(10)
                     continue
 
-                if not self._within_rate_limit():
-                    logger.debug('Mesh: rate limit reached — pausing 5 s')
-                    time.sleep(5)
-                    continue
-
-                # Priority 1: selfie jobs (guest is waiting live)
+                # Selfie jobs are always higher priority (guest is waiting live)
                 selfie_jobs = self._safe_get_selfie_jobs()
                 if selfie_jobs:
                     self._process_selfie_job(selfie_jobs[0])
                     continue
 
-                # Priority 2: photo vectoring jobs
-                jobs = self._safe_get_vectoring_jobs()
-                if jobs:
-                    job = jobs[0]
-                    self._process_vectoring_job(job['id'], job['photo_id'], job.get('r2_url', ''))
-                    continue
+                # Fill buffer if empty
+                with self._buffer_lock:
+                    is_empty = len(self._buffer) == 0
+
+                if is_empty:
+                    batch = self._fetch_batch()
+                    if not batch:
+                        time.sleep(_IDLE_POLL_SECS)
+                        continue
+                    with self._buffer_lock:
+                        self._buffer.extend(batch)
+                    # Kick off prefetch for the first N+1 jobs in buffer
+                    with self._buffer_lock:
+                        ahead = list(self._buffer)[:_PREFETCH_AHEAD + 1]
+                    self._prefetch(ahead)
+
+                with self._buffer_lock:
+                    if not self._buffer:
+                        continue
+                    job = self._buffer.popleft()
+                    # Prefetch next jobs while this one is being processed
+                    ahead = list(self._buffer)[:_PREFETCH_AHEAD]
+
+                if ahead:
+                    self._prefetch(ahead)
+
+                self._process_job(job)
 
             except Exception as e:
-                logger.error(f'  Mesh worker error: {e}')
+                logger.error(f'Mesh worker loop error: {e}')
+                time.sleep(5)
 
-            time.sleep(self._poll_interval)
+    # ── Job fetch ──────────────────────────────────────────────────────────────
 
-    def _safe_get_vectoring_jobs(self) -> list:
+    def _fetch_batch(self) -> list:
         try:
-            return self.api.get_jobs()
+            return self.api.pull_jobs(self._batch_size())
         except Exception as e:
-            logger.debug(f'Mesh: get_jobs error: {e}')
+            logger.debug(f'Mesh: pull_jobs error: {e}')
             return []
 
-    def _safe_get_selfie_jobs(self) -> list:
+    # ── Prefetch (parallel download) ───────────────────────────────────────────
+
+    def _prefetch(self, jobs: list):
+        for job in jobs:
+            jid = job['job_id']
+            with self._cache_lock:
+                if jid in self._cache:
+                    continue
+                self._cache[jid] = _PENDING
+            t = threading.Thread(target=self._download_to_cache, args=(job,), daemon=True)
+            t.start()
+
+    def _download_to_cache(self, job: dict):
+        jid = job['job_id']
+        url = job.get('r2_url', '')
         try:
-            return self.api.get_selfie_jobs()
+            resp = requests.get(url, timeout=_DOWNLOAD_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.content
+            logger.debug(f'Prefetch {jid[:8]}: {len(data):,} bytes')
         except Exception as e:
-            logger.debug(f'Mesh: get_selfie_jobs error: {e}')
-            return []
+            logger.debug(f'Prefetch {jid[:8]}: download failed: {e}')
+            data = b''
+        with self._cache_lock:
+            self._cache[jid] = data
+
+    def _get_image(self, job: dict) -> Optional[bytes]:
+        """Return image bytes; downloads synchronously if not already prefetched."""
+        jid = job['job_id']
+
+        with self._cache_lock:
+            val = self._cache.get(jid)
+
+        # Not started yet — download synchronously
+        if val is None:
+            self._download_to_cache(job)
+            with self._cache_lock:
+                val = self._cache.get(jid)
+            return val if val else None
+
+        # Wait for an in-flight prefetch
+        if val is _PENDING:
+            deadline = time.time() + _PREFETCH_WAIT
+            while time.time() < deadline:
+                with self._cache_lock:
+                    val = self._cache.get(jid)
+                if val is not _PENDING:
+                    return val if val else None
+                time.sleep(0.05)
+            logger.warning(f'Prefetch {jid[:8]}: timeout after {_PREFETCH_WAIT}s')
+            return None
+
+        return val if val else None
 
     # ── Vectoring job ──────────────────────────────────────────────────────────
 
-    def _process_vectoring_job(self, job_id: str, photo_id: str, r2_url: str):
-        logger.debug(f'Mesh: vectoring job {job_id[:8]}...')
-        start_time = time.time()
-        try:
-            self.api.claim_job(job_id)
+    def _process_job(self, job: dict):
+        jid = job['job_id']
+        photo_id = job['photo_id']
+        assigned_at = job.get('assigned_at', datetime.now(timezone.utc).isoformat())
+        urgent = job.get('is_urgent', False)
 
-            if not r2_url:
-                self.api.fail_job(job_id, 'No R2 URL')
+        logger.debug(f'Mesh: vectoring {jid[:8]} (urgent={urgent})')
+
+        try:
+            img = self._get_image(job)
+            if not img:
+                logger.error(f'Mesh: {jid[:8]} — download produced no data')
+                self.api.fail_job(jid, 'Download failed')
                 return
 
-            img_resp = requests.get(r2_url, timeout=30)
-            img_resp.raise_for_status()
-
             with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                tmp.write(img_resp.content)
+                tmp.write(img)
                 tmp_path = tmp.name
 
             try:
@@ -169,54 +243,57 @@ class MeshWorker:
             finally:
                 os.unlink(tmp_path)
 
-            processing_ms = int((time.time() - start_time) * 1000)
-            self.api.complete_job(job_id, photo_id, face_results or [], processing_ms=processing_ms)
-            self._record_job_done()
-            logger.debug(f'Mesh: vectoring {job_id[:8]} done — {len(face_results or [])} face(s), {processing_ms} ms')
+            completed_at = datetime.now(timezone.utc).isoformat()
+            self.api.complete_job(jid, photo_id, face_results or [], completed_at=completed_at)
+
+            face_count = len(face_results or [])
+            logger.debug(f'Mesh: {jid[:8]} done — {face_count} face(s)')
 
         except Exception as e:
-            logger.error(f'  Mesh: vectoring {job_id[:8]} failed: {e}')
-            self.api.fail_job(job_id, str(e))
+            logger.error(f'Mesh: {jid[:8]} failed: {e}')
+            self.api.fail_job(jid, str(e))
 
-    # ── Selfie job ─────────────────────────────────────────────────────────────
+        finally:
+            with self._cache_lock:
+                self._cache.pop(jid, None)
+
+    # ── Selfie job (guest face-matching, unchanged from v1) ────────────────────
+
+    def _safe_get_selfie_jobs(self) -> list:
+        try:
+            return self.api.get_selfie_jobs()
+        except Exception as e:
+            logger.debug(f'Mesh: get_selfie_jobs error: {e}')
+            return []
 
     def _process_selfie_job(self, job: dict):
         job_id = job['id']
-        logger.debug(f'Mesh: selfie job {job_id[:8]}...')
+        logger.debug(f'Mesh: selfie {job_id[:8]}')
         try:
             self.api.claim_selfie_job(job_id)
 
             selfie_b64 = job.get('selfie_base64', '')
             if not selfie_b64:
-                logger.error(f'Mesh: selfie {job_id[:8]} — no selfie data in payload')
                 self.api.fail_selfie_job(job_id, 'No selfie data')
                 return
-
-            logger.debug(f'Mesh: selfie {job_id[:8]} — b64 length={len(selfie_b64):,}')
 
             if ',' in selfie_b64:
                 _, selfie_b64 = selfie_b64.split(',', 1)
 
             try:
                 image_bytes = base64.b64decode(selfie_b64)
-                logger.debug(f'Mesh: selfie {job_id[:8]} — {len(image_bytes):,} bytes decoded')
-            except Exception as decode_err:
-                logger.error(f'Mesh: selfie {job_id[:8]} — decode failed: {decode_err}')
-                self.api.fail_selfie_job(job_id, f'base64 decode error: {decode_err}')
+            except Exception as e:
+                self.api.fail_selfie_job(job_id, f'base64 decode error: {e}')
                 return
 
             embedding = self.vision_manager.process_selfie(image_bytes, timeout=15.0)
-
             if not embedding:
-                logger.warning(f'Mesh: selfie {job_id[:8]} — no face detected')
                 self.api.fail_selfie_job(job_id, 'No face detected in selfie')
                 return
 
-            logger.debug(f'Mesh: selfie {job_id[:8]} — dim={len(embedding)}, posting')
             self.api.complete_selfie_job(job_id, embedding)
-            self._record_job_done()
             logger.debug(f'Mesh: selfie {job_id[:8]} done')
 
         except Exception as e:
-            logger.error(f'  Mesh: selfie {job_id[:8]} failed: {e}', exc_info=True)
+            logger.error(f'Mesh: selfie {job_id[:8]} failed: {e}', exc_info=True)
             self.api.fail_selfie_job(job_id, str(e))

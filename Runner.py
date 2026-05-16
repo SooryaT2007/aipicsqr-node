@@ -148,9 +148,10 @@ def main():
         api_client=api,
         resource_monitor=resource_monitor,
         upload_queue=upload_queue,
+        vision_manager=vision_manager,  # used for startup benchmark
     )
     telemetry.start()
-    logger.info('OK Telemetry started (60 s pulse)')
+    logger.info('OK Telemetry started (60 s pulse + startup benchmark)')
 
     mesh_worker = MeshWorker(
         config=config,

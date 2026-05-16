@@ -53,6 +53,11 @@ class Config:
         # Telemetry
         self.pulse_interval = 60
 
+        # Server-assigned performance score (0–100).
+        # Updated by TelemetryService on each pulse; read by MeshWorker
+        # to compute dynamic batch size for pull_vector_tasks.
+        self.performance_score: int = 1
+
         # Persistent identity (populated from node_config.json)
         self._photographer_ids: list[str] = []
         self._active_photographer_id: str = ''

@@ -84,7 +84,7 @@ class APIClient:
 
     # ── Telemetry ─────────────────────────────────────────────────────────────
 
-    def pulse(self, resource_status: dict) -> dict:
+    def pulse(self, resource_status: dict, startup_benchmark_ms: int | None = None) -> dict:
         payload = {
             **self._auth(),
             'node_id':           self._config.node_id,
@@ -102,6 +102,9 @@ class APIClient:
             # Upload load signal — server applies upload penalty to score
             'upload_queue_depth': resource_status.get('upload_queue_depth', 0),
         }
+        # Startup benchmark — sent once; primes avg_job_ms before any real jobs run
+        if startup_benchmark_ms is not None:
+            payload['startup_benchmark_ms'] = startup_benchmark_ms
         resp = self._post(
             f'{self._config.api_base_url}/api/nodes/pulse',
             json=payload,
@@ -225,44 +228,47 @@ class APIClient:
 
     # ── Mesh jobs ─────────────────────────────────────────────────────────────
 
-    def get_jobs(self) -> list:
+    def pull_jobs(self, batch_size: int) -> list:
+        """
+        Atomically claim up to batch_size vectoring jobs via pull_vector_tasks
+        (SKIP LOCKED). Returns a list of pre-claimed job dicts each containing:
+          job_id, photo_id, r2_url, assigned_at, is_urgent
+        No separate claim call is needed.
+        """
+        payload = {**self._auth(), 'batch_size': batch_size}
         resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs',
-            json=self._auth(),
-            timeout=10,
+            json=payload,
+            timeout=15,
         )
         resp.raise_for_status()
         return resp.json().get('jobs', [])
-
-    def claim_job(self, job_id: str) -> dict:
-        resp = self._post(
-            f'{self._config.api_base_url}/api/node/jobs/{job_id}/claim',
-            json=self._auth(),
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
 
     def complete_job(
         self,
         job_id: str,
         photo_id: str,
         face_results: list,
-        processing_ms: int = 0,
+        completed_at: str | None = None,
     ) -> dict:
+        """
+        Report a completed vectoring job. completed_at is an ISO timestamp
+        captured immediately after the last result is ready; the server uses
+        it together with claimed_at to compute the true end-to-end job_ms.
+        """
         face_vectors = [
             {
-                'embedding': f['embedding'],
-                'bbox': f['bbox'],
+                'embedding':  f['embedding'],
+                'bbox':       f['bbox'],
                 'confidence': f['confidence'],
             }
             for f in face_results
         ]
         payload = {
             **self._auth(),
-            'photo_id':      photo_id,
-            'face_vectors':  face_vectors,
-            'processing_ms': processing_ms if processing_ms > 0 else None,
+            'photo_id':     photo_id,
+            'face_vectors': face_vectors,
+            'completed_at': completed_at,
         }
         resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs/{job_id}/complete',
