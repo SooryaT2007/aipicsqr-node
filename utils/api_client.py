@@ -324,6 +324,14 @@ class APIClient:
         except Exception:
             pass
 
+    def complete_folder(self, folder_id: str) -> None:
+        """Mark an import-once folder as done (scan submitted, no more watching)."""
+        self._post(
+            f'{self._config.api_base_url}/api/node/folders/complete',
+            json={**self._auth(), 'folder_id': folder_id},
+            timeout=10,
+        ).raise_for_status()
+
     # ── Graceful shutdown ─────────────────────────────────────────────────────
 
     def go_offline(self) -> None:

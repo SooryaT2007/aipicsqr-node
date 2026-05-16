@@ -88,10 +88,12 @@ class FolderWatcher:
     def __init__(self,
                  on_new_photo: Callable[[str, dict], None],
                  upload_queue: Optional[UploadQueue] = None,
-                 state_db: Optional[UploadStateDB] = None):
+                 state_db: Optional[UploadStateDB] = None,
+                 api=None):
         self._on_new_photo = on_new_photo
         self._upload_queue = upload_queue
         self._state_db = state_db
+        self._api = api
         self._folder_info: dict[str, dict] = {}
         self._watches: dict[str, object] = {}
         self._observer = Observer()
@@ -167,11 +169,31 @@ class FolderWatcher:
                 logger.warning(f'Cannot create folder {path}: {e}')
                 return
 
+        mode = folder_info.get('mode', 'watch')
+
+        if mode == 'once':
+            # Import Once: snapshot files at this moment, submit all, mark done — no watchdog
+            self._folder_info[path] = folder_info
+            logger.info(f'  Import Once: {Path(path).name}')
+            self._scan_existing(folder_info, on_complete=self._on_import_once_complete)
+            return
+
+        # Keep Watching: start watchdog + initial scan
         watch = self._observer.schedule(self._handler, str(folder_path), recursive=True)
         self._watches[path] = watch
         self._folder_info[path] = folder_info
         logger.info(f'  Watching: {Path(path).name}')
         self._scan_existing(folder_info)
+
+    def _on_import_once_complete(self, folder_info: dict, submitted: int):
+        path = folder_info.get('path', '')
+        folder_id = folder_info.get('id')
+        logger.info(f'  Import Once done: {submitted} photo(s) submitted from {Path(path).name}')
+        if folder_id and self._api:
+            try:
+                self._api.complete_folder(folder_id)
+            except Exception as e:
+                logger.warning(f'  Failed to mark folder {folder_id[:8]} complete: {e}')
 
     def _remove_folder(self, path: str):
         watch = self._watches.pop(path, None)
@@ -201,7 +223,7 @@ class FolderWatcher:
         logger.warning(f'File {p.name} not matched to any tracked folder')
         self._submit(fp, {}, priority=0)
 
-    def _scan_existing(self, folder_info: dict):
+    def _scan_existing(self, folder_info: dict, on_complete=None):
         path = folder_info['path']
         try:
             files = [
@@ -210,9 +232,14 @@ class FolderWatcher:
             ]
         except Exception as e:
             logger.warning(f'Initial scan error for {path}: {e}')
+            if on_complete:
+                on_complete(folder_info, 0)
             return
 
         if not files:
+            logger.info(f'  Initial scan: 0 photos in {Path(path).name}')
+            if on_complete:
+                on_complete(folder_info, 0)
             return
 
         logger.info(f'  Initial scan: {len(files)} existing photo(s) in {Path(path).name}')
@@ -227,6 +254,8 @@ class FolderWatcher:
                 submitted += 1
             if submitted:
                 logger.info(f'  Submitted {submitted} photo(s) to upload queue')
+            if on_complete:
+                on_complete(folder_info, submitted)
 
         threading.Thread(target=_run, daemon=True).start()
 

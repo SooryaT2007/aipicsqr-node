@@ -122,6 +122,7 @@ def main():
         on_new_photo=lambda fp, fi: upload_queue.submit(UploadTask(priority=0, file_path=fp, folder_info=fi)),
         upload_queue=upload_queue,
         state_db=state_db,
+        api=api,
     )
     watcher.start()
     logger.info('OK Folder Watcher started')
