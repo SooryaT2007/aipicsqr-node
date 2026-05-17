@@ -442,9 +442,20 @@ class NodeApp:
                     if clear_otp:
                         self._otp_var.set('')
                     self._refresh_lb()
+
+                    # Start the runner immediately if it is not already running
+                    if _find_runner() is None:
+                        try:
+                            _launch_runner()
+                            runner_note = '\n\nThe Runner is starting in the background — ready to process photos.'
+                        except Exception as launch_err:
+                            runner_note = f'\n\nCould not auto-start Runner: {launch_err}\nUse the Logs tab to start it manually.'
+                    else:
+                        runner_note = '\n\nThe Runner is already running.'
+
                     messagebox.showinfo('Logged in!',
-                        f'Logged in as:\n{photographer_id[:8]}…{photographer_id[-4:]}\n\n'
-                        'Start the Runner (Runner.bat) to begin processing photos.')
+                        f'Logged in as:\n{photographer_id[:8]}…{photographer_id[-4:]}'
+                        + runner_note)
                 self.root.after(0, finish)
             except (ValueError, ConnectionError) as e:
                 self.root.after(0, lambda: messagebox.showerror('Failed', str(e)))

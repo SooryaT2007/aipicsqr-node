@@ -60,6 +60,17 @@ def folder_poll_loop(api: APIClient, watcher: FolderWatcher, shutdown_event: thr
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    # Singleton guard: if the NodeServer port is already bound, another instance
+    # is running. Exit silently rather than crashing with "address in use".
+    import socket as _sock
+    try:
+        _s = _sock.create_connection(('127.0.0.1', 19432), timeout=0.5)
+        _s.close()
+        logger.info('Runner already active on port 19432 — exiting.')
+        sys.exit(0)
+    except OSError:
+        pass  # Port not listening — safe to start
+
     logger.info('=' * 60)
     logger.info('  AIPICSQR Photographer Node v2.2.0')
     logger.info('=' * 60)
