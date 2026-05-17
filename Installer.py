@@ -272,7 +272,9 @@ class InstallerApp:
 
         if VENV_PYTHON.exists():
             ok = subprocess.run(
-                [str(VENV_PYTHON), '-c', 'import cv2, PIL, watchdog, psutil, requests'],
+                [str(VENV_PYTHON), '-c',
+                 'import cv2, PIL, watchdog, psutil, requests;'
+                 'import certifi, os; assert os.path.isfile(certifi.where())'],
                 capture_output=True,
             ).returncode == 0
             results['deps'] = ('done', 'installed') if ok else ('pending', '')
@@ -375,7 +377,9 @@ class InstallerApp:
         self._spinner_step = 'deps'
         step_state('deps', 'running')
         deps_ok = subprocess.run(
-            [str(VENV_PYTHON), '-c', 'import cv2, PIL, watchdog, psutil, requests'],
+            [str(VENV_PYTHON), '-c',
+             'import cv2, PIL, watchdog, psutil, requests;'
+             'import certifi, os; assert os.path.isfile(certifi.where())'],
             capture_output=True,
         ).returncode == 0
 

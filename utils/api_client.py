@@ -42,6 +42,22 @@ class APIClient:
         self._fail_streak   = 0
         self._circuit_open  = False
 
+        # Verify certifi CA bundle at startup — a missing cacert.pem (common after
+        # a partial uninstall) silently breaks ALL HTTPS requests.  Fail fast here
+        # so the log shows one clear message rather than hundreds of SSL errors.
+        try:
+            import certifi as _certifi
+            import os as _os
+            _ca = _certifi.where()
+            if not _os.path.isfile(_ca):
+                logger.critical(
+                    f'TLS CA bundle missing: {_ca} — '
+                    'all HTTPS requests will fail. '
+                    'Open Installer.py and click "Repair / Reinstall" to fix.'
+                )
+        except ImportError:
+            pass  # certifi not installed yet; installer will handle it
+
     # ── Internal: retry on DNS / connection errors ────────────────────────────
 
     def _post(self, url: str, **kwargs) -> requests.Response:
