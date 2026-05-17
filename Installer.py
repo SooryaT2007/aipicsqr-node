@@ -49,6 +49,23 @@ BLUE      = '#3b82f6'
 BLUE_D    = '#1d4ed8'
 
 
+# ── Venv health check ─────────────────────────────────────────────────────────
+
+def _venv_ok() -> bool:
+    """True only if the venv exists AND pip is functional inside it.
+
+    A partial uninstall can leave pythonw.exe intact while pip's files are
+    gone (deleted at reboot by MoveFileEx). This catches that state so the
+    installer knows to wipe and recreate rather than blindly proceeding.
+    """
+    if not VENV_PYTHON.exists():
+        return False
+    return subprocess.run(
+        [str(VENV_PYTHON), '-m', 'pip', '--version'],
+        capture_output=True,
+    ).returncode == 0
+
+
 # ── Filesystem helpers ────────────────────────────────────────────────────────
 
 def _rmtree_robust(path: str) -> list[str]:
@@ -246,7 +263,12 @@ class InstallerApp:
         else:
             results['python'] = ('error', f'{v.major}.{v.minor} not supported')
 
-        results['venv'] = ('done', 'ready') if VENV_PYTHON.exists() else ('pending', '')
+        if _venv_ok():
+            results['venv'] = ('done', 'ready')
+        elif VENV_PYTHON.exists():
+            results['venv'] = ('error', 'broken — reinstall')
+        else:
+            results['venv'] = ('pending', '')
 
         if VENV_PYTHON.exists():
             ok = subprocess.run(
@@ -318,15 +340,32 @@ class InstallerApp:
         # ── 2. Venv
         self._spinner_step = 'venv'
         step_state('venv', 'running')
-        if not VENV_PYTHON.exists():
+        venv_dir = BASE_DIR / 'venv'
+        if not _venv_ok():
+            # Partial uninstalls can leave pythonw.exe intact while deleting pip.
+            # Wipe whatever's left and start fresh.
+            if venv_dir.exists():
+                log('Broken virtual environment detected — removing…', AMBER)
+                _rmtree_robust(str(venv_dir))
             log('Creating virtual environment…')
-            r = subprocess.run([sys.executable, '-m', 'venv', str(BASE_DIR / 'venv')],
+            r = subprocess.run([sys.executable, '-m', 'venv', str(venv_dir)],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 step_state('venv', 'error')
                 log(r.stderr or 'venv creation failed', RED)
                 ui(lambda: self._finish_install(False))
                 return
+            # Bootstrap pip in case the system Python was installed without it
+            if not _venv_ok():
+                subprocess.run(
+                    [sys.executable, '-m', 'ensurepip', '--upgrade'],
+                    capture_output=True,
+                )
+                # Upgrade pip inside the new venv regardless
+                subprocess.run(
+                    [str(VENV_PYTHON), '-m', 'ensurepip', '--upgrade'],
+                    capture_output=True,
+                )
         step_state('venv', 'done', 'ready')
         log('Virtual environment ready', GREEN)
         ok_count += 1

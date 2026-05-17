@@ -168,8 +168,24 @@ def _find_runner():
             pass
     return None
 
+def _venv_ok() -> bool:
+    """Quick check: venv exists and pip is functional (guards against partial uninstalls)."""
+    venv_python = BASE_DIR / 'venv' / 'Scripts' / 'python.exe'
+    if not venv_python.exists():
+        return False
+    return subprocess.run(
+        [str(venv_python), '-m', 'pip', '--version'],
+        capture_output=True,
+    ).returncode == 0
+
+
 def _launch_runner():
     pythonw = VENV_PYTHONW if VENV_PYTHONW.exists() else Path(sys.executable).parent / 'pythonw.exe'
+    if VENV_PYTHONW.exists() and not _venv_ok():
+        raise RuntimeError(
+            'The virtual environment is broken (pip is missing).\n\n'
+            'Open Installer.py and click "Repair / Reinstall" to fix it.'
+        )
     if not Path(pythonw).exists():
         raise FileNotFoundError(f'pythonw not found: {pythonw}\nRun Installer.bat to set up the venv.')
     if not RUNNER_PY.exists():
