@@ -16,6 +16,7 @@ logger = logging.getLogger('AIPICSQR-node')
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 _MAX_RETRIES    = 3
 _BACKOFF_FACTOR = 1.5   # sleeps: 0 s, 1.5 s, 3 s
+_CIRCUIT_TRIP   = 3     # consecutive failures before suppressing retry noise
 
 
 class APIClient:
@@ -35,6 +36,12 @@ class APIClient:
         self._session.mount('https://', _adapter)
         self._session.mount('http://',  _adapter)
 
+        # Circuit breaker: after _CIRCUIT_TRIP consecutive connection failures,
+        # stop retrying and suppress per-call logs (single attempt, silent failure)
+        # until the next request succeeds, at which point we log "reconnected" once.
+        self._fail_streak   = 0
+        self._circuit_open  = False
+
     # ── Internal: retry on DNS / connection errors ────────────────────────────
 
     def _post(self, url: str, **kwargs) -> requests.Response:
@@ -44,17 +51,33 @@ class APIClient:
         return self._req('PUT', url, **kwargs)
 
     def _req(self, method: str, url: str, **kwargs) -> requests.Response:
-        """Wraps session.request with retries on transient connection errors."""
+        """Wraps session.request with retries on transient connection/timeout errors.
+
+        Circuit breaker: after _CIRCUIT_TRIP consecutive failures the circuit
+        opens — calls fast-fail with a single attempt and no log output.  The
+        first successful request closes the circuit and logs 'reconnected' once.
+        """
         last_exc: Exception = RuntimeError('no attempts made')
-        for attempt in range(_MAX_RETRIES):
+        attempts = 1 if self._circuit_open else _MAX_RETRIES
+        for attempt in range(attempts):
             try:
-                return self._session.request(method, url, **kwargs)
-            except requests.exceptions.ConnectionError as exc:
+                resp = self._session.request(method, url, **kwargs)
+                if self._circuit_open:
+                    logger.info('Network reconnected')
+                self._fail_streak  = 0
+                self._circuit_open = False
+                return resp
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
                 last_exc = exc
-                if attempt < _MAX_RETRIES - 1:
+                if not self._circuit_open and attempt < attempts - 1:
                     wait = _BACKOFF_FACTOR * (2 ** attempt)
                     logger.debug(f'Network error (attempt {attempt + 1}), retrying in {wait:.0f}s: {exc}')
                     time.sleep(wait)
+
+        self._fail_streak += 1
+        if self._fail_streak == _CIRCUIT_TRIP:
+            self._circuit_open = True
+            logger.warning('Network offline — retry noise suppressed until reconnected')
         raise last_exc
 
     # ── Auth header ───────────────────────────────────────────────────────────

@@ -44,16 +44,20 @@ logger = setup_logger('AIPICSQR-node', log_dir=str(LOG_DIR))
 # ── Folder polling loop ───────────────────────────────────────────────────────
 
 def folder_poll_loop(api: APIClient, watcher: FolderWatcher, shutdown_event: threading.Event):
+    last_count = -1
     while not shutdown_event.is_set():
         try:
             folders = api.get_folders()
             watcher.sync_folders(folders)
-            if folders:
-                logger.info(f'Folder sync: {len(folders)} active folder(s)')
+            count = len(folders)
+            if count != last_count:
+                logger.info(f'Folder sync: {count} active folder(s)')
+                last_count = count
             else:
-                logger.debug('Folder sync: no active folders')
+                logger.debug(f'Folder sync: {count} active folder(s)')
         except Exception as e:
             logger.warning(f'Folder sync failed: {e}')
+            last_count = -1  # next success always logs at INFO so operator sees network recovery
         shutdown_event.wait(30)
 
 

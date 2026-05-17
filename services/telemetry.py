@@ -12,7 +12,6 @@ This seeds avg_job_ms on the server so the load balancer has real data
 from the first job assignment instead of waiting several jobs for warmup.
 """
 
-import io
 import logging
 import threading
 import time
@@ -80,19 +79,25 @@ class TelemetryService:
         """
         Vectorize a synthetic image and measure the full pipeline time.
         Returns elapsed_ms + 3000 (transfer overhead), or None on failure.
+        Uses process_image (not process_selfie) so no misleading "no face" warning fires.
         """
         if self.vision_manager is None:
             return None
+        import os
+        import tempfile
         try:
             from PIL import Image
             img = Image.new('RGB', (640, 480), color=(100, 120, 140))
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG', quality=85)
-            image_bytes = buf.getvalue()
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                img.save(tmp, format='JPEG', quality=85)
+                tmp_path = tmp.name
 
-            t0 = time.time()
-            self.vision_manager.process_selfie(image_bytes, timeout=30.0)
-            elapsed_ms = int((time.time() - t0) * 1000)
+            try:
+                t0 = time.time()
+                self.vision_manager.process_image(tmp_path, timeout=30.0)
+                elapsed_ms = int((time.time() - t0) * 1000)
+            finally:
+                os.unlink(tmp_path)
 
             benchmark = elapsed_ms + 3000  # +3 s transfer allowance per design
             logger.info(f'  Startup benchmark: {elapsed_ms} ms inference + 3000 ms overhead = {benchmark} ms')
