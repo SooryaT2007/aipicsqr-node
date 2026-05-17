@@ -37,8 +37,11 @@ Key behaviours (per system design):
 
   Selfie jobs (face_search_jobs)
   ────────────────────────────────
-  Guest selfie matching remains in face_search_jobs and is polled
-  separately, always processed before bulk vectoring work.
+  Guest selfie matching runs on a dedicated thread that polls every 2 s
+  independently of the vectoring loop. The vision lock in
+  VisionProcessManager serialises the two threads so they never overlap
+  inside the vision process. Worst-case selfie wait = one vectoring job
+  in progress (~20 s max), not the entire queued buffer.
 """
 
 import base64
@@ -71,6 +74,7 @@ class MeshWorker:
         self.resource_monitor = resource_monitor
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._selfie_thread: Optional[threading.Thread] = None
 
         # Claimed jobs waiting to be processed
         self._buffer: deque[dict] = deque()
@@ -84,13 +88,17 @@ class MeshWorker:
 
     def start(self):
         self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True, name='mesh-vectoring')
         self._thread.start()
+        self._selfie_thread = threading.Thread(target=self._selfie_loop, daemon=True, name='mesh-selfie')
+        self._selfie_thread.start()
 
     def stop(self):
         self._running = False
         if self._thread:
             self._thread.join(timeout=10)
+        if self._selfie_thread:
+            self._selfie_thread.join(timeout=10)
         logger.info('Mesh Worker stopped')
 
     # ── Dynamic batch sizing ───────────────────────────────────────────────────
@@ -111,12 +119,6 @@ class MeshWorker:
             try:
                 if self.resource_monitor.should_pause():
                     time.sleep(10)
-                    continue
-
-                # Selfie jobs are always higher priority (guest is waiting live)
-                selfie_jobs = self._safe_get_selfie_jobs()
-                if selfie_jobs:
-                    self._process_selfie_job(selfie_jobs[0])
                     continue
 
                 # Fill buffer if empty
@@ -257,7 +259,25 @@ class MeshWorker:
             with self._cache_lock:
                 self._cache.pop(jid, None)
 
-    # ── Selfie job (guest face-matching, unchanged from v1) ────────────────────
+    # ── Selfie thread (dedicated, higher priority than vectoring) ─────────────
+
+    def _selfie_loop(self):
+        """Polls for selfie jobs independently of the vectoring loop.
+
+        Contends for the vision lock in VisionProcessManager, so it runs as
+        soon as the current vectoring job (if any) finishes — never waits for
+        the whole buffer to drain.
+        """
+        while self._running:
+            try:
+                jobs = self._safe_get_selfie_jobs()
+                if jobs:
+                    self._process_selfie_job(jobs[0])
+                else:
+                    time.sleep(_IDLE_POLL_SECS)
+            except Exception as e:
+                logger.error(f'Selfie loop error: {e}')
+                time.sleep(5)
 
     def _safe_get_selfie_jobs(self) -> list:
         try:

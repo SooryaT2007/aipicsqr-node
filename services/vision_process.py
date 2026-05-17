@@ -11,6 +11,7 @@ via multiprocessing.Queue.
 
 import multiprocessing
 import logging
+import threading
 import time
 from typing import List, Optional
 from multiprocessing import Process, Queue
@@ -116,6 +117,9 @@ class VisionProcessManager:
         self._result_queue: Optional[Queue] = None
         self._ready = False
         self._task_counter = 0
+        # Serialises concurrent callers (selfie thread vs vectoring thread).
+        # Without this, two threads polling _result_queue would steal each other's results.
+        self._call_lock = threading.Lock()
 
     def start(self):
         """Start the vision worker process."""
@@ -186,41 +190,42 @@ class VisionProcessManager:
         Returns:
             List of face results with embeddings
         """
-        self._ensure_alive()
-        if not self.is_ready():
-            logger.warning("Vision process not ready")
+        with self._call_lock:
+            self._ensure_alive()
+            if not self.is_ready():
+                logger.warning("Vision process not ready")
+                return []
+
+            if self.should_delegate():
+                logger.info(f"  âš¡ Delegating {Path(image_path).name} to mesh (resource limit hit)")
+                return []  # Caller should re-queue for mesh processing
+
+            self._task_counter += 1
+            task_id = self._task_counter
+
+            self._task_queue.put({
+                'type': MSG_PROCESS_IMAGE,
+                'task_id': task_id,
+                'image_path': image_path,
+                'confidence_threshold': confidence_threshold,
+            })
+
+            # Wait for result
+            start = time.time()
+            while time.time() - start < timeout:
+                try:
+                    result = self._result_queue.get(timeout=1.0)
+                    if result.get('task_id') == task_id:
+                        if result['type'] == MSG_RESULT:
+                            return result.get('results', [])
+                        elif result['type'] == MSG_ERROR:
+                            logger.error(f"Vision error: {result.get('error')}")
+                            return []
+                except Exception:
+                    continue
+
+            logger.warning(f"Vision process timed out for {image_path}")
             return []
-
-        if self.should_delegate():
-            logger.info(f"  âš¡ Delegating {Path(image_path).name} to mesh (resource limit hit)")
-            return []  # Caller should re-queue for mesh processing
-
-        self._task_counter += 1
-        task_id = self._task_counter
-
-        self._task_queue.put({
-            'type': MSG_PROCESS_IMAGE,
-            'task_id': task_id,
-            'image_path': image_path,
-            'confidence_threshold': confidence_threshold,
-        })
-
-        # Wait for result
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                result = self._result_queue.get(timeout=1.0)
-                if result.get('task_id') == task_id:
-                    if result['type'] == MSG_RESULT:
-                        return result.get('results', [])
-                    elif result['type'] == MSG_ERROR:
-                        logger.error(f"Vision error: {result.get('error')}")
-                        return []
-            except Exception:
-                continue
-
-        logger.warning(f"Vision process timed out for {image_path}")
-        return []
 
     def process_selfie(self, image_data: bytes, timeout: float = 10.0) -> Optional[List[float]]:
         """
@@ -233,26 +238,27 @@ class VisionProcessManager:
         Returns:
             512-dim embedding list or None
         """
-        self._ensure_alive()
-        if not self.is_ready():
+        with self._call_lock:
+            self._ensure_alive()
+            if not self.is_ready():
+                return None
+
+            self._task_counter += 1
+            task_id = self._task_counter
+
+            self._task_queue.put({
+                'type': MSG_PROCESS_SELFIE,
+                'task_id': task_id,
+                'image_data': image_data,
+            })
+
+            start = time.time()
+            while time.time() - start < timeout:
+                try:
+                    result = self._result_queue.get(timeout=1.0)
+                    if result.get('task_id') == task_id:
+                        return result.get('embedding')
+                except Exception:
+                    continue
+
             return None
-
-        self._task_counter += 1
-        task_id = self._task_counter
-
-        self._task_queue.put({
-            'type': MSG_PROCESS_SELFIE,
-            'task_id': task_id,
-            'image_data': image_data,
-        })
-
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                result = self._result_queue.get(timeout=1.0)
-                if result.get('task_id') == task_id:
-                    return result.get('embedding')
-            except Exception:
-                continue
-
-        return None
