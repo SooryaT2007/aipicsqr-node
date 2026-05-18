@@ -151,6 +151,11 @@ class FolderWatcher:
             return 0
 
         folder_id = folder_info.get('id')
+        if folder_id and self._api:
+            try:
+                self._api.report_scan_total(folder_id, len(files))
+            except Exception:
+                pass
         processed = self._state_db.get_processed_paths(folder_id) if self._state_db else set()
         count = 0
         for f in files:
@@ -252,6 +257,12 @@ class FolderWatcher:
 
         def _run():
             folder_id = folder_info.get('id')
+            # Report scan total first so the dashboard denominator is set immediately
+            if folder_id and self._api:
+                try:
+                    self._api.report_scan_total(folder_id, len(files))
+                except Exception:
+                    pass
             processed = self._state_db.get_processed_paths(folder_id) if self._state_db else set()
             submitted = 0
             for f in files:

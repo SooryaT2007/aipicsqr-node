@@ -378,6 +378,15 @@ class APIClient:
             timeout=10,
         ).raise_for_status()
 
+    def report_scan_total(self, folder_id: str, total: int) -> None:
+        """Report the total number of image files found during the initial scan.
+        Used as the denominator for upload/processing progress bars in the dashboard."""
+        self._post(
+            f'{self._config.api_base_url}/api/node/folders/scan-total',
+            json={**self._auth(), 'folder_id': folder_id, 'scan_total': total},
+            timeout=10,
+        ).raise_for_status()
+
     # ── Graceful shutdown ─────────────────────────────────────────────────────
 
     def go_offline(self) -> None:
