@@ -113,10 +113,14 @@ class FolderWatcher:
     # ── Dynamic sync ──────────────────────────────────────────────────────────
 
     def sync_folders(self, active_folders: list[dict]):
-        active_paths = {f['path'] for f in active_folders}
+        # Google Drive folders are handled server-side (re-import via dashboard).
+        # The node has no filesystem role for them — skip to avoid path errors on Windows.
+        local_folders = [f for f in active_folders if not f['path'].startswith('gdrive:')]
+
+        active_paths = {f['path'] for f in local_folders}
         current_paths = set(self._folder_info.keys())
 
-        for folder in active_folders:
+        for folder in local_folders:
             if folder['path'] not in current_paths:
                 self._add_folder(folder)
 
