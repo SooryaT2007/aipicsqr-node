@@ -145,6 +145,11 @@ def main():
     node_server = NodeServer(upload_queue=upload_queue, watcher=watcher)
     node_server.start()
 
+    # Recover any files that made it to R2 but weren't confirmed before last shutdown.
+    # Must run before the watcher scans folders so recovered files are already
+    # marked complete and the scan skips them instead of re-compressing them.
+    uploader.recover_r2_done()
+
     try:
         folders = api.get_folders()
         watcher.sync_folders(folders)
@@ -187,8 +192,8 @@ def main():
     finally:
         logger.info('Stopping services...')
         api.go_offline()
-        uploader.stop()
-        upload_queue.stop()
+        upload_queue.stop()   # wait for all active compressions/uploads to finish first
+        uploader.stop()       # then flush + wait for batch sends to complete
         node_server.stop()
         watcher.stop()
         telemetry.stop()

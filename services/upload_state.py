@@ -4,6 +4,7 @@ Replaces the in-memory _processed_paths set in watcher.py so uploads survive
 Runner restarts and duplicate files are skipped across sessions.
 """
 
+import json
 import os
 import sqlite3
 import threading
@@ -18,6 +19,7 @@ class UploadStateDB:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute('PRAGMA journal_mode=WAL')
+        self._conn.execute('PRAGMA synchronous=NORMAL')  # safe with WAL, faster than FULL
         self._create_schema()
 
     def _create_schema(self):
@@ -34,6 +36,12 @@ class UploadStateDB:
             );
         """)
         self._conn.commit()
+        # Migration: add batch_data column for r2_done recovery (safe on existing DBs)
+        try:
+            self._conn.execute('ALTER TABLE uploaded_files ADD COLUMN batch_data TEXT')
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     # ── File hash ────────────────────────────────────────────────────────────
 
@@ -49,22 +57,39 @@ class UploadStateDB:
     # ── Queries ──────────────────────────────────────────────────────────────
 
     def is_processed(self, file_path: str, file_hash: str) -> bool:
-        """Return True if this exact file (path + hash) completed successfully."""
+        """True if this file is complete or safely in R2 (will be recovered on startup)."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT status FROM uploaded_files WHERE file_path=? AND file_hash=?",
                 (file_path, file_hash),
             ).fetchone()
-            return row is not None and row[0] == 'complete'
+            return row is not None and row[0] in ('complete', 'r2_done')
 
     def is_processed_path(self, file_path: str) -> bool:
-        """Fast in-session check: True if this path completed in any session."""
+        """True if this path is complete or in R2 — prevents re-queuing on restart."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT status FROM uploaded_files WHERE file_path=?",
                 (file_path,),
             ).fetchone()
-            return row is not None and row[0] == 'complete'
+            return row is not None and row[0] in ('complete', 'r2_done')
+
+    def get_r2_done_entries(self) -> list[dict]:
+        """Return all r2_done files with stored batch data for notification recovery."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT file_path, batch_data FROM uploaded_files "
+                "WHERE status='r2_done' AND batch_data IS NOT NULL"
+            ).fetchall()
+        result = []
+        for file_path, batch_data_str in rows:
+            try:
+                d = json.loads(batch_data_str)
+                d['_file_path'] = file_path
+                result.append(d)
+            except Exception:
+                pass
+        return result
 
     # ── State transitions ─────────────────────────────────────────────────────
 
@@ -81,16 +106,27 @@ class UploadStateDB:
                            folder_id=excluded.folder_id,
                            event_id=excluded.event_id,
                            attempted_at=excluded.attempted_at
-                   WHERE uploaded_files.status != 'complete'""",
+                   WHERE uploaded_files.status NOT IN ('complete', 'r2_done')""",
                 (file_path, file_hash, folder_id, event_id, time.time()),
             )
             self._conn.commit()
 
-    def mark_r2_done(self, file_path: str):
+    def mark_r2_done(self, file_path: str, photo_id: Optional[str] = None,
+                     file_size_bytes: int = 0, width: int = 0, height: int = 0,
+                     thumbnail_key: Optional[str] = None):
+        """Mark file as uploaded to R2. Stores batch data so it can be recovered if
+        the process exits before the batch notification API call completes."""
+        batch_data = json.dumps({
+            'photo_id':        photo_id,
+            'file_size_bytes': file_size_bytes,
+            'width':           width,
+            'height':          height,
+            'thumbnail_key':   thumbnail_key,
+        }) if photo_id else None
         with self._lock:
             self._conn.execute(
-                "UPDATE uploaded_files SET status='r2_done' WHERE file_path=?",
-                (file_path,),
+                "UPDATE uploaded_files SET status='r2_done', photo_id=?, batch_data=? WHERE file_path=?",
+                (photo_id, batch_data, file_path),
             )
             self._conn.commit()
 
@@ -98,7 +134,7 @@ class UploadStateDB:
         with self._lock:
             self._conn.execute(
                 """UPDATE uploaded_files
-                   SET status='complete', photo_id=?, completed_at=?
+                   SET status='complete', photo_id=?, batch_data=NULL, completed_at=?
                    WHERE file_path=?""",
                 (photo_id, time.time(), file_path),
             )
@@ -114,4 +150,5 @@ class UploadStateDB:
 
     def close(self):
         with self._lock:
+            self._conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')  # flush WAL before close
             self._conn.close()
