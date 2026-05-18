@@ -45,14 +45,21 @@ logger = setup_logger('AIPICSQR-node', log_dir=str(LOG_DIR))
 
 def folder_poll_loop(api: APIClient, watcher: FolderWatcher, shutdown_event: threading.Event):
     last_count = -1
+    _heartbeat_every = 10  # log at INFO every 10 polls (~5 min) even when nothing changed
+    _poll = 0
     while not shutdown_event.is_set():
         try:
             folders = api.get_folders()
             watcher.sync_folders(folders)
             count = len(folders)
+            _poll += 1
             if count != last_count:
                 logger.info(f'Folder sync: {count} active folder(s)')
                 last_count = count
+                _poll = 0
+            elif _poll >= _heartbeat_every:
+                logger.info(f'Runner alive — watching {count} folder(s)')
+                _poll = 0
             else:
                 logger.debug(f'Folder sync: {count} active folder(s)')
         except Exception as e:
