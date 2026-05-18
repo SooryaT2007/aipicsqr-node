@@ -62,17 +62,25 @@ class UploadStateDB:
 
     # ── Queries ──────────────────────────────────────────────────────────────
 
-    def is_processed(self, file_path: str, file_hash: str) -> bool:
-        """True if this file is complete, safely in R2, or has exhausted retries."""
+    def is_processed(self, file_path: str, file_hash: str,
+                     folder_id: Optional[str] = None) -> bool:
+        """True if this file is complete, safely in R2, or has exhausted retries.
+
+        When folder_id is supplied the record must belong to the same folder.
+        A different folder_id means the user deleted and re-added the folder, so
+        the file should be re-uploaded even if the content hash is identical.
+        """
         with self._lock:
             row = self._conn.execute(
-                "SELECT status, COALESCE(retry_count, 0) FROM uploaded_files "
+                "SELECT status, COALESCE(retry_count, 0), folder_id FROM uploaded_files "
                 "WHERE file_path=? AND file_hash=?",
                 (file_path, file_hash),
             ).fetchone()
             if row is None:
                 return False
-            status, retries = row
+            status, retries, stored_folder_id = row
+            if folder_id and stored_folder_id and folder_id != stored_folder_id:
+                return False  # different folder → treat as new upload
             return status in ('complete', 'r2_done') or (status == 'failed' and retries >= MAX_RETRIES)
 
     def is_processed_path(self, file_path: str) -> bool:
@@ -161,7 +169,7 @@ class UploadStateDB:
                            retry_count=0
                    WHERE uploaded_files.status NOT IN ('complete', 'r2_done')
                       OR (excluded.folder_id IS NOT NULL
-                          AND excluded.folder_id != uploaded_files.folder_id)""",
+                          AND COALESCE(uploaded_files.folder_id, '') != excluded.folder_id)""",
                 (file_path, file_hash, folder_id, event_id, time.time()),
             )
             self._conn.commit()

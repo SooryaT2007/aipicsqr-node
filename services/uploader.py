@@ -100,7 +100,7 @@ class PhotoUploader:
         # Fast dedup: hash first 64 KB and check DB
         if self._state_db:
             file_hash = UploadStateDB.compute_hash(file_path)
-            if file_hash and self._state_db.is_processed(file_path, file_hash):
+            if file_hash and self._state_db.is_processed(file_path, file_hash, folder_id):
                 logger.info(f'  Skipping {path.name} — already uploaded')
                 return
         else:
