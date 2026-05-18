@@ -220,6 +220,24 @@ def _rmtree_robust(path: str) -> list[str]:
     return pending
 
 
+# ── Process helpers ───────────────────────────────────────────────────────────
+
+def _stop_node_processes():
+    """Kill any running Runner.py or APP.py processes to release locked DLLs."""
+    for script in ('Runner.py', 'APP.py'):
+        try:
+            subprocess.run(
+                ['powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
+                 f"Get-CimInstance Win32_Process | "
+                 f"Where-Object {{$_.CommandLine -like '*{script}*'}} | "
+                 f"ForEach-Object {{Stop-Process -Id $_.ProcessId -Force "
+                 f"-ErrorAction SilentlyContinue}}; exit 0"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+
 # ── Step-row widget ───────────────────────────────────────────────────────────
 
 class StepRow:
@@ -580,9 +598,15 @@ class InstallerApp:
         ).returncode == 0
 
         if not deps_ok:
+            # Kill Runner/APP before pip so their loaded DLLs (e.g. psutil) aren't locked
+            log('Stopping any running node processes…')
+            _stop_node_processes()
+            time.sleep(1.5)
+
             log('Installing packages…')
             subprocess.run([str(VENV_PYTHON), '-m', 'pip', 'install', '--quiet',
                             '--upgrade', 'pip'], capture_output=True)
+            pip_output = []
             p = subprocess.Popen(
                 [str(VENV_PYTHON), '-m', 'pip', 'install', '-r', str(REQ_FILE)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -590,11 +614,17 @@ class InstallerApp:
             for line in p.stdout:
                 line = line.rstrip()
                 if line:
+                    pip_output.append(line)
                     log(line)
             p.wait()
             if p.returncode != 0:
                 step_state('deps', 'error')
-                log('Package installation failed', RED)
+                full_output = '\n'.join(pip_output)
+                if 'Access is denied' in full_output or 'WinError 5' in full_output:
+                    log('Access denied — a node process is still holding a package file.', RED)
+                    log('Close the AIPIXQR Runner and App windows, then click Retry Install.', AMBER)
+                else:
+                    log('Package installation failed', RED)
                 ui(lambda: self._finish_install(False))
                 return
 
