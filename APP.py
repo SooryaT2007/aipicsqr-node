@@ -839,8 +839,7 @@ class NodeApp:
             self._btn_stop.configure(state=tk.DISABLED)
 
     def _poll_log(self):
-        today = datetime.now().strftime('%Y%m%d')
-        log_file = LOG_DIR / f'node_{today}.log'
+        log_file = LOG_DIR / 'node.log'
         if not log_file.exists():
             return
         try:
