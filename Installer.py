@@ -10,7 +10,7 @@ After a successful install, APP.py opens automatically so you can log in
 and start the Runner.
 
 Uses only Python standard library so it works before the venv exists.
-Launch via Installer.bat or directly: python Installer.py
+Launch via AIPICSQR-Setup.bat or directly: python Installer.py
 """
 
 import os
@@ -44,26 +44,28 @@ MODELS_DIR   = BASE_DIR / 'models'
 YUNET_MODEL  = MODELS_DIR / 'face_detection_yunet_2023mar.onnx'
 SFACE_MODEL  = MODELS_DIR / 'face_recognition_sface_2021dec.onnx'
 
-# ── Colors ────────────────────────────────────────────────────────────────────
+# ── Colors — Windows light theme ─────────────────────────────────────────────
 
-BG        = '#1c1917'
-BG_CARD   = '#292524'
-BG_LOG    = '#0c0a09'
-FG        = '#e7e5e4'
-FG_MUTED  = '#78716c'
-FG_DIM    = '#44403c'
-GREEN     = '#22c55e'
-RED       = '#ef4444'
-AMBER     = '#f59e0b'
-BLUE      = '#3b82f6'
-BLUE_D    = '#1d4ed8'
+BG        = '#F3F3F3'   # window / dialog background
+BG_CARD   = '#FFFFFF'   # white content cards
+BG_LOG    = '#FAFAFA'   # log area background
+BG_HEADER = '#0078D4'   # Windows accent blue header
+FG        = '#1A1A1A'   # primary text
+FG_HDR    = '#FFFFFF'   # text on blue header
+FG_MUTED  = '#6B6B6B'   # secondary / hint text
+FG_DIM    = '#C0C0C0'   # placeholder / pending icons
+GREEN     = '#107C10'   # Windows success green
+RED       = '#C42B1C'   # Windows error red
+AMBER     = '#CA5010'   # Windows warning orange
+BLUE      = '#0078D4'   # Windows accent blue
+BLUE_D    = '#005A9E'   # darker blue (hover / active)
+BORDER    = '#DEDEDE'   # subtle card / separator borders
+BORDER_IN = '#E8E8E8'   # inner step-row separator
 
 
 # ── Python auto-install helpers ───────────────────────────────────────────────
 
 def _find_compatible_python() -> Optional[str]:
-    """Return path to a compatible Python 3.10-3.13 exe, or None."""
-    # 1. py launcher (version-specific — most reliable on Windows)
     for minor in (13, 12, 11, 10):
         try:
             r = subprocess.run(
@@ -77,10 +79,9 @@ def _find_compatible_python() -> Optional[str]:
         except Exception:
             pass
 
-    # 2. 'python' command — validate version before trusting it
     try:
         r = subprocess.run(['python', '--version'], capture_output=True, text=True, timeout=8)
-        parts = r.stdout.strip().split()  # ['Python', '3.12.9']
+        parts = r.stdout.strip().split()
         if len(parts) == 2:
             major, minor, *_ = parts[1].split('.')
             if int(major) == 3 and 10 <= int(minor) <= 13:
@@ -95,7 +96,6 @@ def _find_compatible_python() -> Optional[str]:
     except Exception:
         pass
 
-    # 3. Registry (finds installs that weren't added to PATH)
     if sys.platform == 'win32':
         try:
             import winreg
@@ -116,7 +116,6 @@ def _find_compatible_python() -> Optional[str]:
         except ImportError:
             pass
 
-    # 4. Well-known filesystem paths (last resort)
     localappdata = os.environ.get('LOCALAPPDATA', '')
     programfiles = os.environ.get('PROGRAMFILES', '')
     for minor in (313, 312, 311, 310):
@@ -133,14 +132,12 @@ def _find_compatible_python() -> Optional[str]:
 
 
 def _auto_install_python(log_fn) -> Optional[str]:
-    """Download and silently install Python 3.12.9. Returns path to new python.exe or None."""
     is_64 = platform.machine().endswith('64')
     url   = _PY_URL_64 if is_64 else _PY_URL_32
     arch  = 'amd64' if is_64 else 'x86'
     fname = f'python-{_PY_TARGET_VER}-{arch}.exe'
     tmp   = Path(tempfile.gettempdir()) / fname
 
-    # Download
     log_fn(f'Downloading {fname} (~25 MB)…')
     try:
         def _progress(count, block, total):
@@ -158,17 +155,12 @@ def _auto_install_python(log_fn) -> Optional[str]:
         tmp.unlink(missing_ok=True)
         return None
 
-    # Install silently (no admin needed — user-scope install)
     log_fn('Installing Python (please wait, 1-2 minutes)…')
     try:
         r = subprocess.run([
-            str(tmp),
-            '/quiet',
-            'InstallAllUsers=0',
-            'PrependPath=1',
-            'Include_launcher=1',
-            'Include_test=0',
-            'Include_doc=0',
+            str(tmp), '/quiet',
+            'InstallAllUsers=0', 'PrependPath=1',
+            'Include_launcher=1', 'Include_test=0', 'Include_doc=0',
         ], timeout=300)
         rc = r.returncode
     except subprocess.TimeoutExpired:
@@ -188,22 +180,13 @@ def _auto_install_python(log_fn) -> Optional[str]:
         log_fn(f'Installer exited with code {rc}.')
         return None
 
-    # Wait a moment for Windows to finish registering the install
     time.sleep(2)
-
-    # Locate the newly installed Python
     return _find_compatible_python()
 
 
 # ── Venv health check ─────────────────────────────────────────────────────────
 
 def _venv_ok() -> bool:
-    """True only if the venv exists AND pip is functional inside it.
-
-    A partial uninstall can leave pythonw.exe intact while pip's files are
-    gone (deleted at reboot by MoveFileEx). This catches that state so the
-    installer knows to wipe and recreate rather than blindly proceeding.
-    """
     if not VENV_PYTHON.exists():
         return False
     return subprocess.run(
@@ -215,10 +198,8 @@ def _venv_ok() -> bool:
 # ── Filesystem helpers ────────────────────────────────────────────────────────
 
 def _rmtree_robust(path: str) -> list[str]:
-    """Delete a directory tree on Windows, handling locked files gracefully."""
     import shutil as _shutil
     import ctypes
-
     MOVEFILE_DELAY_UNTIL_REBOOT = 4
     pending: list[str] = []
 
@@ -244,30 +225,44 @@ def _rmtree_robust(path: str) -> list[str]:
 class StepRow:
     _ICONS = {
         'pending': ('○', FG_DIM),
-        'running': ('▸', AMBER),
+        'running': ('●', BLUE),
         'done':    ('✓', GREEN),
         'error':   ('✗', RED),
     }
+    _SPINNER = ('◐', '◓', '◑', '◒')
 
-    def __init__(self, parent: tk.Widget, label: str):
-        self._frame = tk.Frame(parent, bg=BG_CARD, padx=12, pady=7)
-        self._frame.pack(fill=tk.X, pady=1)
+    def __init__(self, parent: tk.Widget, label: str, last: bool = False):
+        self._frame = tk.Frame(parent, bg=BG_CARD, padx=16, pady=10)
+        self._frame.pack(fill=tk.X)
+        if not last:
+            tk.Frame(parent, bg=BORDER_IN, height=1).pack(fill=tk.X, padx=12)
 
-        self._icon = tk.Label(self._frame, text='○', fg=FG_DIM, bg=BG_CARD,
-                               font=('Segoe UI', 14), width=2, anchor='w')
+        self._icon = tk.Label(
+            self._frame, text='○', fg=FG_DIM, bg=BG_CARD,
+            font=('Segoe UI', 12), width=2, anchor='w',
+        )
         self._icon.pack(side=tk.LEFT)
 
-        tk.Label(self._frame, text=label, bg=BG_CARD, fg=FG,
-                 font=('Segoe UI', 10)).pack(side=tk.LEFT, padx=10)
+        tk.Label(
+            self._frame, text=label, bg=BG_CARD, fg=FG,
+            font=('Segoe UI', 10), anchor='w',
+        ).pack(side=tk.LEFT, padx=8)
 
-        self._note = tk.Label(self._frame, text='', bg=BG_CARD, fg=FG_MUTED,
-                               font=('Segoe UI', 9))
-        self._note.pack(side=tk.RIGHT)
+        self._note = tk.Label(
+            self._frame, text='', bg=BG_CARD, fg=FG_MUTED,
+            font=('Segoe UI', 9, 'italic'),
+        )
+        self._note.pack(side=tk.RIGHT, padx=4)
 
     def set(self, state: str, note: str = ''):
         icon, color = self._ICONS.get(state, ('○', FG_DIM))
         self._icon.configure(text=icon, fg=color)
-        self._note.configure(text=note)
+        note_color = RED if state == 'error' else FG_MUTED
+        self._note.configure(text=note, fg=note_color)
+
+    def spin(self, frame_idx: int):
+        char = self._SPINNER[frame_idx % len(self._SPINNER)]
+        self._icon.configure(text=char, fg=BLUE)
 
 
 # ── Main app ──────────────────────────────────────────────────────────────────
@@ -275,9 +270,9 @@ class StepRow:
 class InstallerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title('AIPIXQR Node — Installer')
-        self.root.geometry('700x540')
-        self.root.minsize(620, 460)
+        self.root.title('AIPIXQR Node Setup')
+        self.root.geometry('680x560')
+        self.root.minsize(600, 480)
         self.root.configure(bg=BG)
         try:
             self.root.iconbitmap(str(BASE_DIR / 'icon.ico'))
@@ -290,9 +285,61 @@ class InstallerApp:
 
         self._apply_style()
         self._build_header()
+        self._build_body()
+        self._build_footer()
 
-        nb = ttk.Notebook(root)
-        nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        self._check_initial_state()
+        self._spinner_tick()
+
+    # ── Style ─────────────────────────────────────────────────────────────────
+
+    def _apply_style(self):
+        s = ttk.Style()
+        try:
+            s.theme_use('clam')
+        except Exception:
+            pass
+        s.configure('TNotebook',
+                    background=BG, borderwidth=0, tabmargins=[0, 0, 0, 0])
+        s.configure('TNotebook.Tab',
+                    background='#E5E5E5', foreground=FG_MUTED,
+                    padding=[20, 7], font=('Segoe UI', 9),
+                    borderwidth=0, focuscolor='')
+        s.map('TNotebook.Tab',
+              background=[('selected', BG_CARD), ('active', '#EFEFEF')],
+              foreground=[('selected', FG)])
+        s.configure('Horizontal.TProgressbar',
+                    troughcolor='#E8E8E8', background=BLUE,
+                    thickness=8, borderwidth=0, relief='flat')
+
+    # ── Header (blue banner) ──────────────────────────────────────────────────
+
+    def _build_header(self):
+        hdr = tk.Frame(self.root, bg=BG_HEADER, height=76)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+
+        inner = tk.Frame(hdr, bg=BG_HEADER)
+        inner.place(relx=0, rely=0.5, x=24, anchor='w')
+
+        tk.Label(inner, text='AIPIXQR Node', bg=BG_HEADER, fg=FG_HDR,
+                 font=('Segoe UI', 18, 'bold')).pack(anchor='w')
+        tk.Label(inner, text='Photographer upload node installer',
+                 bg=BG_HEADER, fg='#BFD7F0',
+                 font=('Segoe UI', 9)).pack(anchor='w')
+
+        self._hdr_status = tk.Label(hdr, text='', bg=BG_HEADER, fg='#BFD7F0',
+                                     font=('Segoe UI', 9))
+        self._hdr_status.place(relx=1.0, rely=0.5, x=-20, anchor='e')
+
+        # 1px separator under header
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill=tk.X)
+
+    # ── Body (tabbed) ─────────────────────────────────────────────────────────
+
+    def _build_body(self):
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill=tk.BOTH, expand=True)
 
         self._tab_setup     = tk.Frame(nb, bg=BG)
         self._tab_uninstall = tk.Frame(nb, bg=BG)
@@ -302,44 +349,28 @@ class InstallerApp:
         self._build_setup_tab()
         self._build_uninstall_tab()
 
-        self._check_initial_state()
-        self._spinner_tick()
+    # ── Footer (status bar) ───────────────────────────────────────────────────
 
-    # ── Style / Header ────────────────────────────────────────────────────────
-
-    def _apply_style(self):
-        s = ttk.Style()
-        try:
-            s.theme_use('clam')
-        except Exception:
-            pass
-        s.configure('TNotebook',          background=BG, borderwidth=0)
-        s.configure('TNotebook.Tab',      background=BG_CARD, foreground=FG_MUTED,
-                    padding=[16, 8], font=('Segoe UI', 10))
-        s.map('TNotebook.Tab',            background=[('selected', BG)],
-                                          foreground=[('selected', FG)])
-        s.configure('Horizontal.TProgressbar', troughcolor=BG_CARD,
-                    background=BLUE, thickness=6)
-
-    def _build_header(self):
-        hdr = tk.Frame(self.root, bg=BG, pady=16)
-        hdr.pack(fill=tk.X, padx=16)
-        tk.Label(hdr, text='AIPIXQR Node', bg=BG, fg=FG,
-                 font=('Segoe UI', 16, 'bold')).pack(side=tk.LEFT)
-        self._hdr_status = tk.Label(hdr, text='', bg=BG, fg=FG_MUTED,
-                                     font=('Segoe UI', 9))
-        self._hdr_status.pack(side=tk.RIGHT)
+    def _build_footer(self):
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill=tk.X, side=tk.BOTTOM)
+        foot = tk.Frame(self.root, bg='#EBEBEB', pady=5)
+        foot.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Label(foot, text='© 2025 AIPICSQR  ·  dashboard.aipicsqr.com',
+                 bg='#EBEBEB', fg=FG_MUTED, font=('Segoe UI', 8)).pack(side=tk.LEFT, padx=14)
 
     # ── Setup tab ─────────────────────────────────────────────────────────────
 
     def _build_setup_tab(self):
         f = self._tab_setup
 
-        card = tk.Frame(f, bg=BG_CARD)
-        card.pack(fill=tk.X, padx=12, pady=(12, 6))
+        # Steps card
+        card = tk.Frame(f, bg=BG_CARD, bd=1, relief=tk.SOLID,
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill=tk.X, padx=16, pady=(14, 8))
 
-        tk.Label(card, text='Installation', bg=BG_CARD, fg=FG_MUTED,
-                 font=('Segoe UI', 8, 'bold')).pack(anchor=tk.W, padx=12, pady=(8, 4))
+        tk.Label(card, text='Installation Steps', bg=BG_CARD, fg=FG_MUTED,
+                 font=('Segoe UI', 8, 'bold')).pack(anchor=tk.W, padx=16, pady=(10, 6))
+        tk.Frame(card, bg=BORDER_IN, height=1).pack(fill=tk.X)
 
         self._steps: dict[str, StepRow] = {}
         step_defs = [
@@ -349,48 +380,63 @@ class InstallerApp:
             ('models',  'AI models  (~40 MB)'),
             ('startup', 'Windows startup shortcut'),
         ]
-        for key, label in step_defs:
-            self._steps[key] = StepRow(card, label)
-        tk.Frame(card, bg=BG_CARD, height=6).pack()
+        for i, (key, label) in enumerate(step_defs):
+            last = (i == len(step_defs) - 1)
+            self._steps[key] = StepRow(card, label, last=last)
+        tk.Frame(card, bg=BG_CARD, height=4).pack()
 
+        # Progress bar
         self._progress_var = tk.DoubleVar(value=0)
-        self._progress_bar = ttk.Progressbar(f, variable=self._progress_var,
-                                              maximum=100, length=300,
-                                              style='Horizontal.TProgressbar')
+        self._progress_bar = ttk.Progressbar(
+            f, variable=self._progress_var, maximum=100,
+            style='Horizontal.TProgressbar',
+        )
 
-        log_frame = tk.Frame(f, bg=BG_LOG, bd=1, relief=tk.SUNKEN)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        # Log area
+        log_outer = tk.Frame(f, bg=BORDER, bd=0)
+        log_outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 4))
 
-        self._setup_log = tk.Text(log_frame, bg=BG_LOG, fg=FG_MUTED,
-                                   font=('Consolas', 8), state=tk.DISABLED,
-                                   height=6, wrap=tk.WORD, pady=4, padx=6,
-                                   insertbackground=FG)
-        vsb = tk.Scrollbar(log_frame, command=self._setup_log.yview)
+        log_inner = tk.Frame(log_outer, bg=BG_LOG)
+        log_inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        self._setup_log = tk.Text(
+            log_inner, bg=BG_LOG, fg='#444444',
+            font=('Consolas', 8), state=tk.DISABLED,
+            height=6, wrap=tk.WORD, pady=6, padx=8,
+            insertbackground=FG, relief=tk.FLAT, bd=0,
+            selectbackground='#CCE4F7',
+        )
+        vsb = tk.Scrollbar(log_inner, command=self._setup_log.yview,
+                           bd=0, width=12, relief=tk.FLAT)
         self._setup_log.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._setup_log.pack(fill=tk.BOTH, expand=True)
 
+        # Install button
         btn_row = tk.Frame(f, bg=BG)
-        btn_row.pack(pady=8)
+        btn_row.pack(pady=(4, 10))
         self._btn_install = tk.Button(
             btn_row, text='Install', command=self._run_install,
-            bg=BLUE_D, fg='white', activebackground=BLUE, activeforeground='white',
-            relief=tk.FLAT, padx=28, pady=8, font=('Segoe UI', 10, 'bold'),
+            bg=BLUE, fg='white',
+            activebackground=BLUE_D, activeforeground='white',
+            relief=tk.FLAT, padx=36, pady=9,
+            font=('Segoe UI', 10, 'bold'),
             cursor='hand2', bd=0,
         )
         self._btn_install.pack()
 
-    def _slog(self, msg: str, color: str = FG_MUTED):
+    def _slog(self, msg: str, color: str = '#444444'):
         self._setup_log.configure(state=tk.NORMAL)
-        self._setup_log.insert(tk.END, msg + '\n', f'c{id(color)}')
-        self._setup_log.tag_configure(f'c{id(color)}', foreground=color)
+        tag = f'c{abs(hash(color))}'
+        self._setup_log.tag_configure(tag, foreground=color)
+        self._setup_log.insert(tk.END, msg + '\n', tag)
         self._setup_log.see(tk.END)
         self._setup_log.configure(state=tk.DISABLED)
 
     def _set_progress(self, pct: float):
         self._progress_var.set(pct)
         if pct > 0 and not self._progress_bar.winfo_ismapped():
-            self._progress_bar.pack(fill=tk.X, padx=12, pady=2)
+            self._progress_bar.pack(fill=tk.X, padx=16, pady=(0, 4))
 
     # ── Install flow ──────────────────────────────────────────────────────────
 
@@ -446,11 +492,12 @@ class InstallerApp:
                 self._steps[key].set(state, note)
         all_done = all(s == 'done' for s, _ in states.values())
         if all_done:
-            self._btn_install.configure(text='Repair / Reinstall', bg='#44403c')
-            self._hdr_status.configure(text='● Ready', fg=GREEN)
+            self._btn_install.configure(text='Repair / Reinstall',
+                                        bg='#5A5A5A', activebackground='#444444')
+            self._hdr_status.configure(text='● Installed  ', fg='#A8D8A8')
         else:
-            self._btn_install.configure(text='Install', bg=BLUE_D)
-            self._hdr_status.configure(text='● Not installed', fg=AMBER)
+            self._btn_install.configure(text='Install', bg=BLUE, activebackground=BLUE_D)
+            self._hdr_status.configure(text='● Not installed  ', fg='#FFD080')
 
     def _run_install(self):
         if self._installing:
@@ -467,10 +514,10 @@ class InstallerApp:
 
         def ui(fn): self.root.after(0, fn)
         def step_state(k, s, note=''): ui(lambda: self._steps[k].set(s, note))
-        def log(msg, c=FG_MUTED): ui(lambda: self._slog(msg, c))
+        def log(msg, c='#444444'): ui(lambda: self._slog(msg, c))
         def prog(pct): ui(lambda: self._set_progress(pct))
 
-        # ── 1. Python
+        # 1. Python
         self._spinner_step = 'python'
         step_state('python', 'running')
         v = sys.version_info
@@ -478,7 +525,7 @@ class InstallerApp:
             step_state('python', 'done', f'{v.major}.{v.minor}.{v.micro}')
             log(f'Python {v.major}.{v.minor}.{v.micro}', GREEN)
         else:
-            log(f'Python {v.major}.{v.minor} is not compatible (need 3.10–3.13) — installing Python {_PY_TARGET_VER}…', AMBER)
+            log(f'Python {v.major}.{v.minor} is not compatible — installing {_PY_TARGET_VER}…', AMBER)
             step_state('python', 'running', f'installing {_PY_TARGET_VER}…')
             new_py = _auto_install_python(log)
             if new_py:
@@ -490,19 +537,17 @@ class InstallerApp:
             else:
                 step_state('python', 'error', 'install failed')
                 log('Automatic install failed. Download Python 3.10-3.13 from python.org', RED)
-                log('and run Installer.bat again — it will detect the new version.', RED)
+                log('and run the setup again — it will detect the new version.', RED)
                 ui(lambda: self._finish_install(False))
                 return
         ok_count += 1
         prog((ok_count / n) * 100)
 
-        # ── 2. Venv
+        # 2. Venv
         self._spinner_step = 'venv'
         step_state('venv', 'running')
         venv_dir = BASE_DIR / 'venv'
         if not _venv_ok():
-            # Partial uninstalls can leave pythonw.exe intact while deleting pip.
-            # Wipe whatever's left and start fresh.
             if venv_dir.exists():
                 log('Broken virtual environment detected — removing…', AMBER)
                 _rmtree_robust(str(venv_dir))
@@ -514,23 +559,17 @@ class InstallerApp:
                 log(r.stderr or 'venv creation failed', RED)
                 ui(lambda: self._finish_install(False))
                 return
-            # Bootstrap pip in case the system Python was installed without it
             if not _venv_ok():
-                subprocess.run(
-                    [sys.executable, '-m', 'ensurepip', '--upgrade'],
-                    capture_output=True,
-                )
-                # Upgrade pip inside the new venv regardless
-                subprocess.run(
-                    [str(VENV_PYTHON), '-m', 'ensurepip', '--upgrade'],
-                    capture_output=True,
-                )
+                subprocess.run([sys.executable, '-m', 'ensurepip', '--upgrade'],
+                               capture_output=True)
+                subprocess.run([str(VENV_PYTHON), '-m', 'ensurepip', '--upgrade'],
+                               capture_output=True)
         step_state('venv', 'done', 'ready')
         log('Virtual environment ready', GREEN)
         ok_count += 1
         prog((ok_count / n) * 100)
 
-        # ── 3. Dependencies
+        # 3. Dependencies
         self._spinner_step = 'deps'
         step_state('deps', 'running')
         deps_ok = subprocess.run(
@@ -564,7 +603,7 @@ class InstallerApp:
         ok_count += 1
         prog((ok_count / n) * 100)
 
-        # ── 4. AI models
+        # 4. AI models
         self._spinner_step = 'models'
         step_state('models', 'running')
         if not (YUNET_MODEL.exists() and SFACE_MODEL.exists()):
@@ -589,7 +628,7 @@ class InstallerApp:
         ok_count += 1
         prog((ok_count / n) * 100)
 
-        # ── 5. Startup shortcut
+        # 5. Startup shortcut
         self._spinner_step = 'startup'
         step_state('startup', 'running')
         shortcut_ok = self._create_startup_shortcut(log)
@@ -611,10 +650,10 @@ class InstallerApp:
                 log_fn('Startup folder not found — skipping shortcut')
                 return False
 
-            shortcut   = os.path.join(startup_dir, 'AIPIXQR Node.lnk')
-            pythonw    = str(VENV_PYTHONW)
-            runner_py  = str(BASE_DIR / 'Runner.py')
-            work_dir   = str(BASE_DIR)
+            shortcut  = os.path.join(startup_dir, 'AIPIXQR Node.lnk')
+            pythonw   = str(VENV_PYTHONW)
+            runner_py = str(BASE_DIR / 'Runner.py')
+            work_dir  = str(BASE_DIR)
 
             vbs = BASE_DIR / '_shortcut_tmp.vbs'
             vbs.write_text(
@@ -653,32 +692,33 @@ class InstallerApp:
         self._installing = False
         self._btn_install.configure(state=tk.NORMAL)
         if success:
-            self._btn_install.configure(text='Repair / Reinstall', bg='#44403c')
-            self._hdr_status.configure(text='● Ready', fg=GREEN)
+            self._btn_install.configure(text='Repair / Reinstall',
+                                        bg='#5A5A5A', activebackground='#444444')
+            self._hdr_status.configure(text='● Installed  ', fg='#A8D8A8')
             self._slog('Installation complete!', GREEN)
             self.root.after(800, self._launch_app)
         else:
-            self._btn_install.configure(text='Retry Install', bg=BLUE_D)
-            self._hdr_status.configure(text='● Install failed', fg=RED)
+            self._btn_install.configure(text='Retry Install', bg=BLUE, activebackground=BLUE_D)
+            self._hdr_status.configure(text='● Install failed  ', fg='#FFAAAA')
 
     # ── Spinner animation ─────────────────────────────────────────────────────
 
     def _spinner_tick(self):
         if self._spinner_step and self._spinner_step in self._steps:
-            frames = ['▸ ', ' ▸', '  ']
-            icon = frames[self._spinner_idx % len(frames)]
-            self._steps[self._spinner_step]._icon.configure(text=icon[0], fg=AMBER)
+            self._steps[self._spinner_step].spin(self._spinner_idx)
             self._spinner_idx += 1
-        self.root.after(400, self._spinner_tick)
+        self.root.after(150, self._spinner_tick)
 
     # ── Uninstall tab ─────────────────────────────────────────────────────────
 
     def _make_check_row(self, parent: tk.Frame, var: tk.BooleanVar,
-                        label: str, hint: str):
-        row = tk.Frame(parent, bg=BG_CARD, padx=12, pady=7, cursor='hand2')
+                        label: str, hint: str, last: bool = False):
+        row = tk.Frame(parent, bg=BG_CARD, padx=16, pady=10, cursor='hand2')
         row.pack(fill=tk.X)
+        if not last:
+            tk.Frame(parent, bg=BORDER_IN, height=1).pack(fill=tk.X, padx=12)
 
-        icon_lbl = tk.Label(row, bg=BG_CARD, font=('Segoe UI', 12), width=2, anchor='w')
+        icon_lbl = tk.Label(row, bg=BG_CARD, font=('Segoe UI', 11), width=2, anchor='w')
         text_lbl = tk.Label(row, text=label, bg=BG_CARD, fg=FG,
                             font=('Segoe UI', 10), anchor='w', cursor='hand2')
         hint_lbl = tk.Label(row, text=hint, bg=BG_CARD, fg=FG_MUTED,
@@ -707,11 +747,12 @@ class InstallerApp:
         f = self._tab_uninstall
 
         tk.Label(f, text='Uninstall', bg=BG, fg=FG,
-                 font=('Segoe UI', 14, 'bold')).pack(anchor=tk.W, padx=16, pady=(16, 2))
-        tk.Label(f, text='Select what to remove, then click Uninstall.',
-                 bg=BG, fg=FG_MUTED, font=('Segoe UI', 9)).pack(anchor=tk.W, padx=16, pady=(0, 10))
+                 font=('Segoe UI', 13, 'bold')).pack(anchor=tk.W, padx=18, pady=(16, 2))
+        tk.Label(f, text='Select the components to remove, then click Uninstall.',
+                 bg=BG, fg=FG_MUTED, font=('Segoe UI', 9)).pack(anchor=tk.W, padx=18, pady=(0, 10))
 
-        card = tk.Frame(f, bg=BG_CARD)
+        card = tk.Frame(f, bg=BG_CARD, bd=1, relief=tk.SOLID,
+                        highlightbackground=BORDER, highlightthickness=1)
         card.pack(fill=tk.X, padx=16, pady=(0, 10))
 
         self._un_shortcut = tk.BooleanVar(value=True)
@@ -726,43 +767,47 @@ class InstallerApp:
             (self._un_stop,     'Stop running node process',
              'Terminates the background runner if currently running'),
             (self._un_creds,    'Clear photographer credentials',
-             'Deletes node_config.json — all logged-in accounts will be removed'),
+             'Deletes node_config.json — logged-in account will be removed'),
             (self._un_models,   'Delete AI models  (~40 MB)',
              'Removes the models/ directory'),
             (self._un_venv,     'Delete virtual environment  (~500 MB)',
              'Removes venv/ — packages will need reinstalling'),
         ]
 
-        for var, label, hint in opts:
-            self._make_check_row(card, var, label, hint)
-
-        tk.Frame(card, bg=BG_CARD, height=6).pack()
+        for i, (var, label, hint) in enumerate(opts):
+            self._make_check_row(card, var, label, hint, last=(i == len(opts) - 1))
+        tk.Frame(card, bg=BG_CARD, height=4).pack()
 
         self._btn_uninstall = tk.Button(
             f, text='Uninstall Selected',
             command=self._run_uninstall,
-            bg='#7f1d1d', fg='white',
-            activebackground=RED, activeforeground='white',
-            relief=tk.FLAT, padx=24, pady=8,
-            font=('Segoe UI', 10, 'bold'), cursor='hand2',
+            bg='#B71C1C', fg='white',
+            activebackground='#8B0000', activeforeground='white',
+            relief=tk.FLAT, padx=28, pady=9,
+            font=('Segoe UI', 10, 'bold'), cursor='hand2', bd=0,
         )
-        self._btn_uninstall.pack(pady=8)
+        self._btn_uninstall.pack(pady=(0, 8))
 
-        log_frame = tk.Frame(f, bg=BG_LOG, bd=1, relief=tk.SUNKEN)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 12))
+        log_outer = tk.Frame(f, bg=BORDER)
+        log_outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+        log_inner = tk.Frame(log_outer, bg=BG_LOG)
+        log_inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
         self._un_log = tk.Text(
-            log_frame, bg=BG_LOG, fg=FG_MUTED,
+            log_inner, bg=BG_LOG, fg='#444444',
             font=('Consolas', 8), state=tk.DISABLED,
-            wrap=tk.WORD, pady=4, padx=6, insertbackground=FG,
+            wrap=tk.WORD, pady=6, padx=8, relief=tk.FLAT, bd=0,
+            selectbackground='#CCE4F7',
         )
-        vsb = tk.Scrollbar(log_frame, command=self._un_log.yview)
+        vsb = tk.Scrollbar(log_inner, command=self._un_log.yview,
+                           bd=0, width=12, relief=tk.FLAT)
         self._un_log.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._un_log.pack(fill=tk.BOTH, expand=True)
 
-    def _ulog(self, msg: str, color: str = FG_MUTED):
+    def _ulog(self, msg: str, color: str = '#444444'):
         self._un_log.configure(state=tk.NORMAL)
-        tag = f'c{id(color)}'
+        tag = f'c{abs(hash(color))}'
         self._un_log.tag_configure(tag, foreground=color)
         self._un_log.insert(tk.END, msg + '\n', tag)
         self._un_log.see(tk.END)
@@ -782,7 +827,7 @@ class InstallerApp:
 
     def _uninstall_thread(self):
         def ui(fn): self.root.after(0, fn)
-        def log(msg, c=FG_MUTED): ui(lambda: self._ulog(msg, c))
+        def log(msg, c='#444444'): ui(lambda: self._ulog(msg, c))
 
         runner_was_stopped = False
         if self._un_stop.get():
@@ -794,7 +839,6 @@ class InstallerApp:
                 _have_psutil = False
 
             def _kill_by_script(script_name: str) -> bool:
-                """Terminate any python process whose cmdline contains script_name."""
                 killed = False
                 if _have_psutil:
                     for p in _psutil.process_iter(['pid', 'cmdline']):
@@ -871,7 +915,6 @@ class InstallerApp:
         if self._un_venv.get():
             venv_dir = BASE_DIR / 'venv'
             if venv_dir.exists():
-                # Give Windows 2 s to release .pyd file handles after the runner terminates.
                 if runner_was_stopped:
                     time.sleep(2)
                 pending = _rmtree_robust(str(venv_dir))
