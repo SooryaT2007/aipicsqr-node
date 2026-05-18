@@ -150,7 +150,8 @@ class FolderWatcher:
             logger.warning(f'import_once scan error for {folder_path}: {e}')
             return 0
 
-        processed = self._state_db.get_processed_paths() if self._state_db else set()
+        folder_id = folder_info.get('id')
+        processed = self._state_db.get_processed_paths(folder_id) if self._state_db else set()
         count = 0
         for f in files:
             fp = str(f.resolve())
@@ -250,7 +251,8 @@ class FolderWatcher:
         logger.info(f'  Initial scan: {len(files)} existing photo(s) in {Path(path).name}')
 
         def _run():
-            processed = self._state_db.get_processed_paths() if self._state_db else set()
+            folder_id = folder_info.get('id')
+            processed = self._state_db.get_processed_paths(folder_id) if self._state_db else set()
             submitted = 0
             for f in files:
                 fp = str(f.resolve())

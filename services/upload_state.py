@@ -87,16 +87,33 @@ class UploadStateDB:
             status, retries = row
             return status in ('complete', 'r2_done') or (status == 'failed' and retries >= MAX_RETRIES)
 
-    def get_processed_paths(self) -> set:
-        """Return a set of all file paths that should be skipped (complete / r2_done / exhausted).
-        One query instead of N calls to is_processed_path — use for bulk initial scans."""
+    def get_processed_paths(self, folder_id: Optional[str] = None) -> set:
+        """Return file paths that should be skipped during an initial scan.
+
+        Scoped to folder_id when provided: a file is only skipped if it was
+        already processed for THIS folder. When a folder is deleted and re-added
+        a new folder_id UUID is issued, so its files are not in this set and will
+        be re-uploaded — even if the same paths were processed for a prior folder.
+
+        Falls back to unscoped (path-only) when folder_id is None so callers that
+        don't have folder context still work correctly.
+        """
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT file_path FROM uploaded_files "
-                "WHERE status IN ('complete', 'r2_done') "
-                "   OR (status='failed' AND COALESCE(retry_count, 0) >= ?)",
-                (MAX_RETRIES,),
-            ).fetchall()
+            if folder_id:
+                rows = self._conn.execute(
+                    "SELECT file_path FROM uploaded_files "
+                    "WHERE folder_id=? "
+                    "  AND (status IN ('complete', 'r2_done') "
+                    "       OR (status='failed' AND COALESCE(retry_count, 0) >= ?))",
+                    (folder_id, MAX_RETRIES),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT file_path FROM uploaded_files "
+                    "WHERE status IN ('complete', 'r2_done') "
+                    "   OR (status='failed' AND COALESCE(retry_count, 0) >= ?)",
+                    (MAX_RETRIES,),
+                ).fetchall()
         return {row[0] for row in rows}
 
     def get_exhausted_paths(self) -> list:
@@ -140,8 +157,11 @@ class UploadStateDB:
                            status='pending',
                            folder_id=excluded.folder_id,
                            event_id=excluded.event_id,
-                           attempted_at=excluded.attempted_at
-                   WHERE uploaded_files.status NOT IN ('complete', 'r2_done')""",
+                           attempted_at=excluded.attempted_at,
+                           retry_count=0
+                   WHERE uploaded_files.status NOT IN ('complete', 'r2_done')
+                      OR (excluded.folder_id IS NOT NULL
+                          AND excluded.folder_id != uploaded_files.folder_id)""",
                 (file_path, file_hash, folder_id, event_id, time.time()),
             )
             self._conn.commit()
