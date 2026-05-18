@@ -267,14 +267,15 @@ class APIClient:
 
     # ── Mesh jobs ─────────────────────────────────────────────────────────────
 
-    def pull_jobs(self, batch_size: int) -> list:
+    def pull_jobs(self) -> list:
         """
-        Atomically claim up to batch_size vectoring jobs via pull_vector_tasks
-        (SKIP LOCKED). Returns a list of pre-claimed job dicts each containing:
-          job_id, photo_id, r2_url, assigned_at, is_urgent
-        No separate claim call is needed.
+        Atomically claim vectoring jobs via pull_vector_tasks (SKIP LOCKED).
+        Batch size is determined entirely by the server from the stored
+        performance_score — the node does not calculate or send one.
+        Returns a list of pre-claimed job dicts: job_id, photo_id, r2_url,
+        assigned_at, is_urgent.
         """
-        payload = {**self._auth(), 'batch_size': batch_size}
+        payload = self._auth()
         resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs',
             json=payload,

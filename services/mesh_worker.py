@@ -6,13 +6,12 @@ function (SKIP LOCKED). Replaces the old poll-then-claim pattern.
 
 Key behaviours (per system design):
 
-  Dynamic batching
-  ─────────────────
-  Batch size is derived from the server-assigned performance_score stored
-  in config (updated on every pulse):
-    score > 80  →  20 jobs per pull
-    score < 30  →   2 jobs per pull
-    else        →  linear interpolation
+  Server-driven batching
+  ───────────────────────
+  The node does NOT calculate batch size. The server derives it from the
+  stored performance_score and applies the fair-share cap. This keeps all
+  distribution logic on the cloud so it can be updated without a node
+  reinstall.
 
   Parallel prefetch
   ──────────────────
@@ -101,17 +100,6 @@ class MeshWorker:
             self._selfie_thread.join(timeout=10)
         logger.info('Mesh Worker stopped')
 
-    # ── Dynamic batch sizing ───────────────────────────────────────────────────
-
-    def _batch_size(self) -> int:
-        score = getattr(self.config, 'performance_score', 1)
-        if score > 80:
-            return 20
-        if score < 30:
-            return 2
-        # Linear: 2 at score=30, 20 at score=80
-        return max(2, round(2 + (score - 30) * 18 / 50))
-
     # ── Main loop ──────────────────────────────────────────────────────────────
 
     def _loop(self):
@@ -157,7 +145,7 @@ class MeshWorker:
 
     def _fetch_batch(self) -> list:
         try:
-            return self.api.pull_jobs(self._batch_size())
+            return self.api.pull_jobs()
         except Exception as e:
             logger.debug(f'Mesh: pull_jobs error: {e}')
             return []
