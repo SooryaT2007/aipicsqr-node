@@ -14,13 +14,23 @@ Launch via Installer.bat or directly: python Installer.py
 """
 
 import os
+import platform
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
+import tempfile
 from pathlib import Path
+from typing import Optional
 import tkinter as tk
 from tkinter import ttk, messagebox
+
+# ── Python auto-install target ────────────────────────────────────────────────
+
+_PY_TARGET_VER  = '3.12.9'
+_PY_URL_64      = f'https://www.python.org/ftp/python/{_PY_TARGET_VER}/python-{_PY_TARGET_VER}-amd64.exe'
+_PY_URL_32      = f'https://www.python.org/ftp/python/{_PY_TARGET_VER}/python-{_PY_TARGET_VER}.exe'
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -47,6 +57,142 @@ RED       = '#ef4444'
 AMBER     = '#f59e0b'
 BLUE      = '#3b82f6'
 BLUE_D    = '#1d4ed8'
+
+
+# ── Python auto-install helpers ───────────────────────────────────────────────
+
+def _find_compatible_python() -> Optional[str]:
+    """Return path to a compatible Python 3.10-3.13 exe, or None."""
+    # 1. py launcher (version-specific — most reliable on Windows)
+    for minor in (13, 12, 11, 10):
+        try:
+            r = subprocess.run(
+                ['py', f'-3.{minor}', '-c', 'import sys; print(sys.executable)'],
+                capture_output=True, text=True, timeout=8,
+            )
+            if r.returncode == 0:
+                exe = r.stdout.strip()
+                if Path(exe).exists():
+                    return exe
+        except Exception:
+            pass
+
+    # 2. 'python' command — validate version before trusting it
+    try:
+        r = subprocess.run(['python', '--version'], capture_output=True, text=True, timeout=8)
+        parts = r.stdout.strip().split()  # ['Python', '3.12.9']
+        if len(parts) == 2:
+            major, minor, *_ = parts[1].split('.')
+            if int(major) == 3 and 10 <= int(minor) <= 13:
+                r2 = subprocess.run(
+                    ['python', '-c', 'import sys; print(sys.executable)'],
+                    capture_output=True, text=True, timeout=8,
+                )
+                if r2.returncode == 0:
+                    exe = r2.stdout.strip()
+                    if Path(exe).exists():
+                        return exe
+    except Exception:
+        pass
+
+    # 3. Registry (finds installs that weren't added to PATH)
+    if sys.platform == 'win32':
+        try:
+            import winreg
+            for minor in (13, 12, 11, 10):
+                for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                    try:
+                        key = winreg.OpenKey(
+                            hive,
+                            rf'Software\Python\PythonCore\3.{minor}\InstallPath',
+                        )
+                        base, _ = winreg.QueryValueEx(key, '')
+                        winreg.CloseKey(key)
+                        exe = Path(base) / 'python.exe'
+                        if exe.exists():
+                            return str(exe)
+                    except OSError:
+                        pass
+        except ImportError:
+            pass
+
+    # 4. Well-known filesystem paths (last resort)
+    localappdata = os.environ.get('LOCALAPPDATA', '')
+    programfiles = os.environ.get('PROGRAMFILES', '')
+    for minor in (313, 312, 311, 310):
+        for base in [
+            Path(localappdata) / f'Programs/Python/Python{minor}',
+            Path(programfiles)  / f'Python{minor}',
+            Path(f'C:/Python{minor}'),
+        ]:
+            exe = base / 'python.exe'
+            if exe.exists():
+                return str(exe)
+
+    return None
+
+
+def _auto_install_python(log_fn) -> Optional[str]:
+    """Download and silently install Python 3.12.9. Returns path to new python.exe or None."""
+    is_64 = platform.machine().endswith('64')
+    url   = _PY_URL_64 if is_64 else _PY_URL_32
+    arch  = 'amd64' if is_64 else 'x86'
+    fname = f'python-{_PY_TARGET_VER}-{arch}.exe'
+    tmp   = Path(tempfile.gettempdir()) / fname
+
+    # Download
+    log_fn(f'Downloading {fname} (~25 MB)…')
+    try:
+        def _progress(count, block, total):
+            if total > 0:
+                pct = min(100, count * block * 100 // total)
+                if pct % 20 == 0:
+                    log_fn(f'  {pct}%…')
+        urllib.request.urlretrieve(url, str(tmp), reporthook=_progress)
+    except Exception as e:
+        log_fn(f'Download error: {e}')
+        return None
+
+    if not tmp.exists() or tmp.stat().st_size < 1_000_000:
+        log_fn('Download produced an incomplete file.')
+        tmp.unlink(missing_ok=True)
+        return None
+
+    # Install silently (no admin needed — user-scope install)
+    log_fn('Installing Python (please wait, 1-2 minutes)…')
+    try:
+        r = subprocess.run([
+            str(tmp),
+            '/quiet',
+            'InstallAllUsers=0',
+            'PrependPath=1',
+            'Include_launcher=1',
+            'Include_test=0',
+            'Include_doc=0',
+        ], timeout=300)
+        rc = r.returncode
+    except subprocess.TimeoutExpired:
+        log_fn('Installation timed out after 5 minutes.')
+        tmp.unlink(missing_ok=True)
+        return None
+    except Exception as e:
+        log_fn(f'Installation error: {e}')
+        tmp.unlink(missing_ok=True)
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    if rc == 1638:
+        log_fn('Python already installed at this version — continuing.')
+    elif rc != 0:
+        log_fn(f'Installer exited with code {rc}.')
+        return None
+
+    # Wait a moment for Windows to finish registering the install
+    time.sleep(2)
+
+    # Locate the newly installed Python
+    return _find_compatible_python()
 
 
 # ── Venv health check ─────────────────────────────────────────────────────────
@@ -259,9 +405,9 @@ class InstallerApp:
 
         v = sys.version_info
         if v.major == 3 and 10 <= v.minor <= 13:
-            results['python'] = ('done', f'Python {v.major}.{v.minor}.{v.micro}')
+            results['python'] = ('done', f'{v.major}.{v.minor}.{v.micro}')
         else:
-            results['python'] = ('error', f'{v.major}.{v.minor} not supported')
+            results['python'] = ('error', f'{v.major}.{v.minor} — will auto-install 3.12')
 
         if _venv_ok():
             results['venv'] = ('done', 'ready')
@@ -332,10 +478,21 @@ class InstallerApp:
             step_state('python', 'done', f'{v.major}.{v.minor}.{v.micro}')
             log(f'Python {v.major}.{v.minor}.{v.micro}', GREEN)
         else:
-            step_state('python', 'error', f'{v.major}.{v.minor} unsupported')
-            log(f'Python {v.major}.{v.minor} is not supported (need 3.10–3.13)', RED)
-            ui(lambda: self._finish_install(False))
-            return
+            log(f'Python {v.major}.{v.minor} is not compatible (need 3.10–3.13) — installing Python {_PY_TARGET_VER}…', AMBER)
+            step_state('python', 'running', f'installing {_PY_TARGET_VER}…')
+            new_py = _auto_install_python(log)
+            if new_py:
+                step_state('python', 'done', f'{_PY_TARGET_VER} installed')
+                log(f'Python {_PY_TARGET_VER} ready — relaunching installer…', GREEN)
+                subprocess.Popen([new_py, str(BASE_DIR / 'Installer.py')], cwd=str(BASE_DIR))
+                ui(lambda: self.root.after(1200, self.root.destroy))
+                return
+            else:
+                step_state('python', 'error', 'install failed')
+                log('Automatic install failed. Download Python 3.10-3.13 from python.org', RED)
+                log('and run Installer.bat again — it will detect the new version.', RED)
+                ui(lambda: self._finish_install(False))
+                return
         ok_count += 1
         prog((ok_count / n) * 100)
 
