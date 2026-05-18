@@ -80,7 +80,8 @@ class UploadStateDB:
                            status='pending',
                            folder_id=excluded.folder_id,
                            event_id=excluded.event_id,
-                           attempted_at=excluded.attempted_at""",
+                           attempted_at=excluded.attempted_at
+                   WHERE uploaded_files.status != 'complete'""",
                 (file_path, file_hash, folder_id, event_id, time.time()),
             )
             self._conn.commit()

@@ -67,7 +67,7 @@ class PhotoUploader:
         if self._state_db:
             file_hash = UploadStateDB.compute_hash(file_path)
             if file_hash and self._state_db.is_processed(file_path, file_hash):
-                logger.debug(f'  Skipping {path.name} — already uploaded (SQLite dedup)')
+                logger.info(f'  Skipping {path.name} — already uploaded')
                 return
         else:
             file_hash = None
