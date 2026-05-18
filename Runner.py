@@ -28,7 +28,7 @@ from utils.logger import setup_logger
 from services.telemetry import TelemetryService
 from services.watcher import FolderWatcher
 from services.uploader import PhotoUploader
-from services.upload_state import UploadStateDB
+from services.upload_state import UploadStateDB, MAX_RETRIES
 from services.upload_queue import UploadQueue, UploadTask
 from services.node_server import NodeServer
 from services.vision_process import VisionProcessManager
@@ -117,6 +117,21 @@ def main():
 
     state_db = UploadStateDB(config.upload_state_db)
     logger.info('OK Upload State DB opened')
+
+    # Prune stale records (complete files deleted from disk, older than 60 days)
+    pruned = state_db.cleanup_old_records(days=60)
+    if pruned:
+        logger.info(f'   Pruned {pruned} stale record(s) from upload DB')
+
+    # Warn about permanently-failed files so the photographer can investigate
+    exhausted = state_db.get_exhausted_paths()
+    if exhausted:
+        logger.warning(
+            f'   {len(exhausted)} file(s) failed >{MAX_RETRIES} times and will not be retried:'
+        )
+        for item in exhausted:
+            logger.warning(f'     {Path(item["file_path"]).name} '
+                           f'(tried {item["retry_count"]}x)')
 
     upload_queue = UploadQueue(
         max_workers=config.upload_workers,

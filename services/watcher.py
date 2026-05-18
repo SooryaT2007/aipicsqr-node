@@ -150,10 +150,11 @@ class FolderWatcher:
             logger.warning(f'import_once scan error for {folder_path}: {e}')
             return 0
 
+        processed = self._state_db.get_processed_paths() if self._state_db else set()
         count = 0
         for f in files:
             fp = str(f.resolve())
-            if self._state_db and self._state_db.is_processed_path(fp):
+            if fp in processed:
                 continue
             self._submit(fp, folder_info, priority=2)
             count += 1
@@ -249,14 +250,17 @@ class FolderWatcher:
         logger.info(f'  Initial scan: {len(files)} existing photo(s) in {Path(path).name}')
 
         def _run():
+            processed = self._state_db.get_processed_paths() if self._state_db else set()
             submitted = 0
             for f in files:
                 fp = str(f.resolve())
-                if self._state_db and self._state_db.is_processed_path(fp):
+                if fp in processed:
                     continue
                 self._submit(fp, folder_info, priority=1)
                 submitted += 1
-            if submitted:
+            if submitted == 0:
+                logger.info(f'  All {len(files)} photo(s) already processed — skipping')
+            else:
                 logger.info(f'  Submitted {submitted} photo(s) to upload queue')
             if on_complete:
                 on_complete(folder_info, submitted)

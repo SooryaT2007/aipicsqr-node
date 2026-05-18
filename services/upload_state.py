@@ -12,6 +12,8 @@ import hashlib
 import time
 from typing import Optional
 
+MAX_RETRIES = 5
+
 
 class UploadStateDB:
     def __init__(self, db_path: str):
@@ -36,12 +38,16 @@ class UploadStateDB:
             );
         """)
         self._conn.commit()
-        # Migration: add batch_data column for r2_done recovery (safe on existing DBs)
-        try:
-            self._conn.execute('ALTER TABLE uploaded_files ADD COLUMN batch_data TEXT')
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        # Safe migrations for columns added after initial release
+        for stmt in (
+            'ALTER TABLE uploaded_files ADD COLUMN batch_data TEXT',
+            'ALTER TABLE uploaded_files ADD COLUMN retry_count INTEGER DEFAULT 0',
+        ):
+            try:
+                self._conn.execute(stmt)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     # ── File hash ────────────────────────────────────────────────────────────
 
@@ -57,22 +63,51 @@ class UploadStateDB:
     # ── Queries ──────────────────────────────────────────────────────────────
 
     def is_processed(self, file_path: str, file_hash: str) -> bool:
-        """True if this file is complete or safely in R2 (will be recovered on startup)."""
+        """True if this file is complete, safely in R2, or has exhausted retries."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT status FROM uploaded_files WHERE file_path=? AND file_hash=?",
+                "SELECT status, COALESCE(retry_count, 0) FROM uploaded_files "
+                "WHERE file_path=? AND file_hash=?",
                 (file_path, file_hash),
             ).fetchone()
-            return row is not None and row[0] in ('complete', 'r2_done')
+            if row is None:
+                return False
+            status, retries = row
+            return status in ('complete', 'r2_done') or (status == 'failed' and retries >= MAX_RETRIES)
 
     def is_processed_path(self, file_path: str) -> bool:
-        """True if this path is complete or in R2 — prevents re-queuing on restart."""
+        """True if this path is complete, in R2, or has exhausted retries."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT status FROM uploaded_files WHERE file_path=?",
+                "SELECT status, COALESCE(retry_count, 0) FROM uploaded_files WHERE file_path=?",
                 (file_path,),
             ).fetchone()
-            return row is not None and row[0] in ('complete', 'r2_done')
+            if row is None:
+                return False
+            status, retries = row
+            return status in ('complete', 'r2_done') or (status == 'failed' and retries >= MAX_RETRIES)
+
+    def get_processed_paths(self) -> set:
+        """Return a set of all file paths that should be skipped (complete / r2_done / exhausted).
+        One query instead of N calls to is_processed_path — use for bulk initial scans."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT file_path FROM uploaded_files "
+                "WHERE status IN ('complete', 'r2_done') "
+                "   OR (status='failed' AND COALESCE(retry_count, 0) >= ?)",
+                (MAX_RETRIES,),
+            ).fetchall()
+        return {row[0] for row in rows}
+
+    def get_exhausted_paths(self) -> list:
+        """Return file paths that failed more than MAX_RETRIES times — for startup logging."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT file_path, COALESCE(retry_count, 0) FROM uploaded_files "
+                "WHERE status='failed' AND COALESCE(retry_count, 0) >= ?",
+                (MAX_RETRIES,),
+            ).fetchall()
+        return [{'file_path': r[0], 'retry_count': r[1]} for r in rows]
 
     def get_r2_done_entries(self) -> list[dict]:
         """Return all r2_done files with stored batch data for notification recovery."""
@@ -143,10 +178,35 @@ class UploadStateDB:
     def mark_failed(self, file_path: str):
         with self._lock:
             self._conn.execute(
-                "UPDATE uploaded_files SET status='failed' WHERE file_path=?",
+                "UPDATE uploaded_files "
+                "SET status='failed', retry_count=COALESCE(retry_count, 0) + 1 "
+                "WHERE file_path=?",
                 (file_path,),
             )
             self._conn.commit()
+
+    def cleanup_old_records(self, days: int = 60) -> int:
+        """Delete 'complete' records whose file no longer exists on disk and are
+        older than `days` days. Keeps the DB from growing unbounded on large shoots.
+        Returns the number of rows deleted."""
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT file_path FROM uploaded_files "
+                "WHERE status='complete' AND completed_at < ?",
+                (cutoff,),
+            ).fetchall()
+        # Check disk existence outside the lock to avoid holding it during I/O
+        stale = [r[0] for r in rows if not os.path.exists(r[0])]
+        if not stale:
+            return 0
+        with self._lock:
+            self._conn.executemany(
+                "DELETE FROM uploaded_files WHERE file_path=?",
+                [(p,) for p in stale],
+            )
+            self._conn.commit()
+        return len(stale)
 
     def close(self):
         with self._lock:
