@@ -17,6 +17,10 @@ import sys
 import urllib.request
 from pathlib import Path
 
+# Ensure stdout can handle any character without crashing on Windows CP1252 consoles
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 MODELS_DIR = Path(__file__).parent / 'models'
 
 MODELS = {
@@ -35,12 +39,12 @@ MODELS = {
 
 def download_file(url: str, dest: Path, description: str):
     """Download a file with progress reporting."""
-    print(f"\nðŸ“¥ Downloading: {description}")
+    print(f"\nDownloading: {description}")
     print(f"   URL: {url}")
     print(f"   Destination: {dest}")
 
     if dest.exists():
-        print(f"   âœ… Already exists, skipping.")
+        print(f"   OK Already exists, skipping.")
         return
 
     try:
@@ -50,14 +54,17 @@ def download_file(url: str, dest: Path, description: str):
                 percent = min(100, downloaded * 100 / total_size)
                 bar_len = 30
                 filled = int(bar_len * percent / 100)
-                bar = 'â–ˆ' * filled + 'â–‘' * (bar_len - filled)
+                bar = '#' * filled + '.' * (bar_len - filled)
                 sys.stdout.write(f"\r   [{bar}] {percent:.0f}%")
                 sys.stdout.flush()
 
         urllib.request.urlretrieve(url, str(dest), reporthook=progress_hook)
-        print(f"\n   âœ… Downloaded: {dest.stat().st_size / 1024 / 1024:.1f} MB")
+        print(f"\n   OK Downloaded: {dest.stat().st_size / 1024 / 1024:.1f} MB")
     except Exception as e:
-        print(f"\n   âŒ Failed: {e}")
+        try:
+            print(f"\n   FAILED: {e}")
+        except Exception:
+            print("\n   FAILED (see above)")
         if dest.exists():
             dest.unlink()
         raise
@@ -69,7 +76,6 @@ def main():
     print("  Commercially Licensed AI Models (Apache 2.0)")
     print("=" * 60)
 
-    # Create models directory
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     for filename, info in MODELS.items():
@@ -77,7 +83,7 @@ def main():
         download_file(info['url'], dest, info['description'])
 
     print("\n" + "=" * 60)
-    print("  âœ… All models downloaded successfully!")
+    print("  All models downloaded successfully!")
     print(f"  Location: {MODELS_DIR}")
     print("=" * 60)
     print("\nYou can now run the Photographer Node:")
