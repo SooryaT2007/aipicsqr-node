@@ -209,7 +209,6 @@ class MeshWorker:
     def _process_job(self, job: dict):
         jid = job['job_id']
         photo_id = job['photo_id']
-        assigned_at = job.get('assigned_at', datetime.now(timezone.utc).isoformat())
         urgent = job.get('is_urgent', False)
 
         logger.debug(f'Mesh: vectoring {jid[:8]} (urgent={urgent})')
@@ -220,6 +219,11 @@ class MeshWorker:
                 logger.error(f'Mesh: {jid[:8]} — download produced no data')
                 self.api.fail_job(jid, 'Download failed')
                 return
+
+            # Record start time after download — this is the true per-image
+            # processing start. claimed_at is shared across the whole batch so
+            # using it would inflate avg_job_ms for every job after the first.
+            started_at = datetime.now(timezone.utc).isoformat()
 
             with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
                 tmp.write(img)
@@ -234,7 +238,8 @@ class MeshWorker:
                 os.unlink(tmp_path)
 
             completed_at = datetime.now(timezone.utc).isoformat()
-            self.api.complete_job(jid, photo_id, face_results or [], completed_at=completed_at)
+            self.api.complete_job(jid, photo_id, face_results or [],
+                                  started_at=started_at, completed_at=completed_at)
 
             face_count = len(face_results or [])
             logger.debug(f'Mesh: {jid[:8]} done — {face_count} face(s)')

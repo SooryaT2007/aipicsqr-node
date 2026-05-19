@@ -289,12 +289,15 @@ class APIClient:
         job_id: str,
         photo_id: str,
         face_results: list,
+        started_at: str | None = None,
         completed_at: str | None = None,
     ) -> dict:
         """
-        Report a completed vectoring job. completed_at is an ISO timestamp
-        captured immediately after the last result is ready; the server uses
-        it together with claimed_at to compute the true end-to-end job_ms.
+        Report a completed vectoring job.
+        started_at  — ISO timestamp captured just before ONNX inference begins,
+                      after the image is downloaded. Used by the server to compute
+                      true per-image job_ms (not inflated by batch queue wait).
+        completed_at — ISO timestamp captured immediately after inference finishes.
         """
         face_vectors = [
             {
@@ -308,6 +311,7 @@ class APIClient:
             **self._auth(),
             'photo_id':     photo_id,
             'face_vectors': face_vectors,
+            'started_at':   started_at,
             'completed_at': completed_at,
         }
         resp = self._post(
