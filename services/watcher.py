@@ -256,27 +256,31 @@ class FolderWatcher:
         logger.info(f'  Initial scan: {len(files)} existing photo(s) in {Path(path).name}')
 
         def _run():
-            folder_id = folder_info.get('id')
-            # Report scan total first so the dashboard denominator is set immediately
-            if folder_id and self._api:
-                try:
-                    self._api.report_scan_total(folder_id, len(files))
-                except Exception:
-                    pass
-            processed = self._state_db.get_processed_paths(folder_id) if self._state_db else set()
             submitted = 0
-            for f in files:
-                fp = str(f.resolve())
-                if fp in processed:
-                    continue
-                self._submit(fp, folder_info, priority=1)
-                submitted += 1
-            if submitted == 0:
-                logger.info(f'  All {len(files)} photo(s) already processed — skipping')
-            else:
-                logger.info(f'  Submitted {submitted} photo(s) to upload queue')
-            if on_complete:
-                on_complete(folder_info, submitted)
+            try:
+                folder_id = folder_info.get('id')
+                # Report scan total first so the dashboard denominator is set immediately
+                if folder_id and self._api:
+                    try:
+                        self._api.report_scan_total(folder_id, len(files))
+                    except Exception:
+                        pass
+                processed = self._state_db.get_processed_paths(folder_id) if self._state_db else set()
+                for f in files:
+                    fp = str(f.resolve())
+                    if fp in processed:
+                        continue
+                    self._submit(fp, folder_info, priority=1)
+                    submitted += 1
+                if submitted == 0:
+                    logger.info(f'  All {len(files)} photo(s) already processed — skipping')
+                else:
+                    logger.info(f'  Submitted {submitted} photo(s) to upload queue')
+            except Exception as e:
+                logger.error(f'  Initial scan failed for {path}: {e}')
+            finally:
+                if on_complete:
+                    on_complete(folder_info, submitted)
 
         threading.Thread(target=_run, daemon=True).start()
 

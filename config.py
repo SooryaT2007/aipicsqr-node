@@ -7,9 +7,15 @@ Supports multiple linked photographer IDs; one is active at a time.
 import json
 from pathlib import Path
 
-BASE_DIR     = Path(__file__).parent
-CONFIG_PATH  = BASE_DIR / 'node_config.json'
-API_BASE_URL = 'https://dashboard.aipicsqr.com'
+BASE_DIR      = Path(__file__).parent
+CONFIG_PATH   = BASE_DIR / 'node_config.json'
+API_BASE_URL  = 'https://dashboard.aipicsqr.com'
+
+# Bumped when the node protocol changes (new fields sent to server, new API
+# endpoints required, or behaviour the server needs to handle differently).
+# The server stores this per-node so old installs can be identified and
+# handled gracefully without forcing a reinstall.
+NODE_VERSION  = '2.2.0'
 
 
 class Config:

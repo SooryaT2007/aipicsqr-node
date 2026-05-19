@@ -10,6 +10,7 @@ import logging
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from config import NODE_VERSION
 
 logger = logging.getLogger('AIPICSQR-node')
 
@@ -140,6 +141,8 @@ class APIClient:
             'cpu_freq_mhz':      resource_status.get('cpu_freq_mhz'),
             # Upload load signal — server applies upload penalty to score
             'upload_queue_depth': resource_status.get('upload_queue_depth', 0),
+            # Node software version — server uses this to handle old installs gracefully
+            'node_version':      NODE_VERSION,
         }
         # Startup benchmark — sent once; primes avg_job_ms before any real jobs run
         if startup_benchmark_ms is not None:
@@ -275,7 +278,7 @@ class APIClient:
         Returns a list of pre-claimed job dicts: job_id, photo_id, r2_url,
         assigned_at, is_urgent.
         """
-        payload = self._auth()
+        payload = {**self._auth(), 'node_version': NODE_VERSION}
         resp = self._post(
             f'{self._config.api_base_url}/api/node/jobs',
             json=payload,

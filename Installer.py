@@ -710,13 +710,29 @@ class InstallerApp:
             return False
 
     def _launch_app(self):
+        app_py = BASE_DIR / 'APP.py'
+        if not app_py.exists():
+            self._slog('APP.py not found — reinstall may be needed.', RED)
+            return
+
+        # Try interpreters in order: venv pythonw → venv python → system pythonw → sys.executable
+        candidates = [
+            VENV_PYTHONW,
+            VENV_PYTHON,
+            Path(sys.executable).parent / 'pythonw.exe',
+            Path(sys.executable),
+        ]
+        interp = next((p for p in candidates if p.exists()), None)
+        if interp is None:
+            self._slog('Could not find Python interpreter to launch app.', RED)
+            return
+
         try:
-            app_py  = BASE_DIR / 'APP.py'
-            pythonw = VENV_PYTHONW if VENV_PYTHONW.exists() else Path(sys.executable).parent / 'pythonw.exe'
-            flags   = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-            subprocess.Popen([str(pythonw), str(app_py)], cwd=str(BASE_DIR), creationflags=flags)
-        except Exception:
-            pass
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            subprocess.Popen([str(interp), str(app_py)], cwd=str(BASE_DIR), creationflags=flags)
+            self._slog('AIPIXQR Node app launched — check your taskbar.', GREEN)
+        except Exception as e:
+            self._slog(f'Failed to launch app: {e}', RED)
 
     def _finish_install(self, success: bool):
         self._installing = False

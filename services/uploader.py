@@ -131,9 +131,11 @@ class PhotoUploader:
                     self._state_db.mark_complete(file_path, presign.get('photo_id'))
                 return
 
-            upload_url       = presign['upload_url']
+            upload_url       = presign.get('upload_url')
+            photo_id         = presign.get('photo_id')
+            if not upload_url or not photo_id:
+                raise ValueError(f"Presign response missing fields (got: {list(presign.keys())})")
             thumbnail_url_r2 = presign.get('thumbnail_upload_url')
-            photo_id         = presign['photo_id']
             thumb_key        = presign.get('thumbnail_key')
 
             # STEP 3: PUT main image to R2
