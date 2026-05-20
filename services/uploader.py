@@ -226,6 +226,8 @@ class PhotoUploader:
                         self.api.upload_complete(
                             entry['photo_id'], entry['file_size_bytes'],
                             entry['width'], entry['height'],
+                            thumbnail_key=entry.get('thumbnail_key'),
+                            thumbnail_url=entry.get('thumbnail_url'),
                         )
                         if self._state_db:
                             self._state_db.mark_complete(entry['_file_path'], entry['photo_id'])
