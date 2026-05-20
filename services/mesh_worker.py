@@ -46,6 +46,7 @@ Key behaviours (per system design):
 import base64
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -82,6 +83,7 @@ class MeshWorker:
         # Download cache: job_id → bytes | _PENDING | b'' (failed download)
         self._cache: dict[str, Any] = {}
         self._cache_lock = threading.Lock()
+        self._organize_thread: Optional[threading.Thread] = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -91,6 +93,8 @@ class MeshWorker:
         self._thread.start()
         self._selfie_thread = threading.Thread(target=self._selfie_loop, daemon=True, name='mesh-selfie')
         self._selfie_thread.start()
+        self._organize_thread = threading.Thread(target=self._organize_loop, daemon=True, name='mesh-organize')
+        self._organize_thread.start()
 
     def stop(self):
         self._running = False
@@ -98,6 +102,8 @@ class MeshWorker:
             self._thread.join(timeout=10)
         if self._selfie_thread:
             self._selfie_thread.join(timeout=10)
+        if self._organize_thread:
+            self._organize_thread.join(timeout=10)
         logger.info('Mesh Worker stopped')
 
     # ── Main loop ──────────────────────────────────────────────────────────────
@@ -310,3 +316,72 @@ class MeshWorker:
         except Exception as e:
             logger.error(f'Mesh: selfie {job_id[:8]} failed: {e}', exc_info=True)
             self.api.fail_selfie_job(job_id, str(e))
+
+    # ── File organise loop ────────────────────────────────────────────────────
+
+    def _organize_loop(self):
+        """Polls for file-organise tasks every 10 s (these are rare, low priority)."""
+        while self._running:
+            try:
+                task = self.api.pull_organize_task()
+                if task:
+                    self._process_organize_task(task)
+                else:
+                    time.sleep(10)
+            except Exception as e:
+                logger.error(f'Organize loop error: {e}')
+                time.sleep(10)
+
+    def _process_organize_task(self, task: dict):
+        task_id   = task['id']
+        task_data = task.get('task_data', {})
+        logger.info(f'Organise task {task_id[:8]} started')
+        try:
+            group_names: list[str] = task_data.get('group_names', [])
+            folders: list[dict]    = task_data.get('folders', [])
+            total_copied = 0
+
+            for folder in folders:
+                folder_path: str       = folder.get('folder_path', '')
+                assignments: list[dict] = folder.get('assignments', [])
+                unselected: list[str]  = folder.get('unselected', [])
+
+                if not os.path.isdir(folder_path):
+                    logger.warning(f'Organise: folder not found: {folder_path}')
+                    continue
+
+                # Create group subdirectories
+                for gname in group_names:
+                    safe = _safe_dirname(gname)
+                    os.makedirs(os.path.join(folder_path, safe), exist_ok=True)
+                os.makedirs(os.path.join(folder_path, 'Unselected'), exist_ok=True)
+
+                # Copy assigned photos
+                for a in assignments:
+                    src  = os.path.join(folder_path, a['filename'])
+                    dest = os.path.join(folder_path, _safe_dirname(a['group_name']), a['filename'])
+                    if os.path.isfile(src) and not os.path.exists(dest):
+                        shutil.copy2(src, dest)
+                        total_copied += 1
+
+                # Copy unselected photos
+                for fname in unselected:
+                    src  = os.path.join(folder_path, fname)
+                    dest = os.path.join(folder_path, 'Unselected', fname)
+                    if os.path.isfile(src) and not os.path.exists(dest):
+                        shutil.copy2(src, dest)
+                        total_copied += 1
+
+            logger.info(f'Organise task {task_id[:8]} done — {total_copied} file(s) copied')
+            self.api.complete_organize_task(task_id)
+
+        except Exception as e:
+            logger.error(f'Organise task {task_id[:8]} failed: {e}', exc_info=True)
+            self.api.fail_organize_task(task_id, str(e))
+
+
+def _safe_dirname(name: str) -> str:
+    """Strip characters that are invalid in folder names on Windows/macOS/Linux."""
+    invalid = r'\/:*?"<>|'
+    safe = ''.join(c if c not in invalid else '_' for c in name)
+    return safe.strip() or 'Group'

@@ -394,6 +394,45 @@ class APIClient:
             timeout=10,
         ).raise_for_status()
 
+    # ── File organise tasks ───────────────────────────────────────────────────
+
+    def pull_organize_task(self) -> dict | None:
+        """
+        Poll for a pending file-organize task assigned to this node.
+        Returns the task dict (id + task_data) or None if nothing is queued.
+        """
+        try:
+            resp = self._post(
+                f'{self._config.api_base_url}/api/node/organize-tasks',
+                json=self._auth(),
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json().get('task')  # None when nothing pending
+        except Exception as e:
+            logger.debug(f'pull_organize_task error: {e}')
+            return None
+
+    def complete_organize_task(self, task_id: str) -> None:
+        try:
+            self._post(
+                f'{self._config.api_base_url}/api/node/organize-tasks/{task_id}/complete',
+                json=self._auth(),
+                timeout=10,
+            ).raise_for_status()
+        except Exception as e:
+            logger.warning(f'complete_organize_task error: {e}')
+
+    def fail_organize_task(self, task_id: str, error: str) -> None:
+        try:
+            self._post(
+                f'{self._config.api_base_url}/api/node/organize-tasks/{task_id}/fail',
+                json={**self._auth(), 'error': error},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
     # ── Graceful shutdown ─────────────────────────────────────────────────────
 
     def go_offline(self) -> None:
