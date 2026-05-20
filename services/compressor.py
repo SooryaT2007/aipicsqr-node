@@ -86,7 +86,7 @@ def compress_image_with_thumbnail(
     quality_min: int = 40,
     max_dimension: int = 3840,
     thumb_width: int = 400,
-    thumb_quality: int = 72,
+    thumb_quality: int = 70,
 ) -> tuple[bytes, bytes, int, int]:
     """
     Compress an image and generate a thumbnail in one pass.
@@ -113,7 +113,7 @@ def compress_image_with_thumbnail(
     thumb_h = int(final_h * (thumb_width / final_w)) if final_w > 0 else thumb_width
     thumb_img = img.resize((thumb_width, thumb_h), Image.LANCZOS)
     thumb_buf = io.BytesIO()
-    thumb_img.save(thumb_buf, format='JPEG', quality=thumb_quality, optimize=True)
+    thumb_img.save(thumb_buf, format='WEBP', quality=thumb_quality, method=4)
     thumbnail_bytes = thumb_buf.getvalue()
 
     quality = quality_start

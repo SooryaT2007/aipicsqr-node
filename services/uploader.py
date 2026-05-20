@@ -154,7 +154,7 @@ class PhotoUploader:
                     _r2_session.put(
                         thumbnail_url_r2,
                         data=thumbnail_bytes,
-                        headers={'Content-Type': 'image/jpeg'},
+                        headers={'Content-Type': 'image/webp'},
                         timeout=30,
                     ).raise_for_status()
                     if hasattr(self.config, 'r2_public_base'):
