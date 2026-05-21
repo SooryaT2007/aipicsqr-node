@@ -469,6 +469,64 @@ class APIClient:
             logger.debug(f'sync_gdrive_folder {folder_id[:8]}: {e}')
             return 0
 
+    # ── Compression jobs (GDrive-source photos) ───────────────────────────────
+
+    def pull_compression_job(self) -> dict | None:
+        """
+        Claim one pending compression_job from the server.
+        Returns the full job dict (download_url, presigned PUT URLs, storage_type,
+        etc.) or None when the queue is empty.
+        Non-raising: returns None on any error so the polling loop keeps going.
+        """
+        try:
+            resp = self._post(
+                f'{self._config.api_base_url}/api/node/compression-jobs',
+                json=self._auth(),
+                timeout=20,
+            )
+            resp.raise_for_status()
+            return resp.json().get('job')  # None when queue empty
+        except Exception as e:
+            logger.debug(f'pull_compression_job error: {e}')
+            return None
+
+    def complete_compression_job(
+        self,
+        job_id: str,
+        thumbnail_key: str,
+        thumbnail_url: str | None,
+        width: int,
+        height: int,
+        file_size_bytes: int,
+        gdrive_file_id: str | None = None,
+    ) -> dict:
+        payload = {
+            **self._auth(),
+            'thumbnail_key':   thumbnail_key,
+            'thumbnail_url':   thumbnail_url,
+            'width':           width,
+            'height':          height,
+            'file_size_bytes': file_size_bytes,
+            'gdrive_file_id':  gdrive_file_id,
+        }
+        resp = self._post(
+            f'{self._config.api_base_url}/api/node/compression-jobs/{job_id}/complete',
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def fail_compression_job(self, job_id: str, error: str) -> None:
+        try:
+            self._post(
+                f'{self._config.api_base_url}/api/node/compression-jobs/{job_id}/fail',
+                json={**self._auth(), 'error': error},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
     # ── Graceful shutdown ─────────────────────────────────────────────────────
 
     def go_offline(self) -> None:

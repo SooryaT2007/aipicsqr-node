@@ -34,6 +34,7 @@ from services.node_server import NodeServer
 from services.vision_process import VisionProcessManager
 from services.resource_monitor import ResourceMonitor
 from services.mesh_worker import MeshWorker
+from services.compression_worker import CompressionWorker
 
 BASE_DIR = Path(__file__).parent
 LOG_DIR  = BASE_DIR / 'logs'
@@ -204,6 +205,9 @@ def main():
     mesh_worker.start()
     logger.info('OK Mesh Worker started')
 
+    compression_worker = CompressionWorker(config=config, api_client=api)
+    compression_worker.start()
+
     logger.info('-' * 60)
     logger.info('  Runner active. Folders are managed from your dashboard.')
     logger.info('-' * 60)
@@ -214,8 +218,9 @@ def main():
     finally:
         logger.info('Stopping services...')
         api.go_offline()
-        upload_queue.stop()   # wait for all active compressions/uploads to finish first
-        uploader.stop()       # then flush + wait for batch sends to complete
+        upload_queue.stop()       # wait for all active compressions/uploads to finish first
+        uploader.stop()           # then flush + wait for batch sends to complete
+        compression_worker.stop() # stop GDrive compression jobs
         node_server.stop()
         watcher.stop()
         telemetry.stop()
