@@ -182,12 +182,15 @@ class VisionProcessManager:
         self,
         image_paths: List[str],
         confidence_threshold: float = 0.7,
-        timeout_per_image: float = 30.0,
-    ) -> List[List[dict]]:
+        timeout_per_image: float = 20.0,
+    ) -> List[Optional[List[dict]]]:
         """Process multiple images sequentially under a single lock acquisition.
 
-        Keeps the vision subprocess continuously busy and avoids repeated
-        lock acquire/release overhead between images in a batch.
+        Returns a list of the same length as image_paths where each entry is:
+          - list[dict] : face results (empty list = photo has no faces — valid)
+          - None       : inference timed out or subprocess crashed — caller
+                         should fail the job so another node can retry it
+
         Selfie wait is bounded by len(image_paths) × timeout_per_image.
         """
         if not image_paths:
@@ -195,10 +198,17 @@ class VisionProcessManager:
         with self._call_lock:
             self._ensure_alive()
             if not self.is_ready():
-                return [[] for _ in image_paths]
+                return [None for _ in image_paths]
 
-            batch_results: List[List[dict]] = []
+            batch_results: List[Optional[List[dict]]] = []
             for image_path in image_paths:
+                # Detect subprocess crash between images — bail out immediately
+                # instead of spinning for timeout_per_image on a dead queue.
+                if not self.is_ready():
+                    logger.warning('Vision subprocess died during batch — aborting remaining images')
+                    batch_results.extend([None] * (len(image_paths) - len(batch_results)))
+                    break
+
                 self._task_counter += 1
                 task_id = self._task_counter
                 self._task_queue.put({
@@ -207,7 +217,7 @@ class VisionProcessManager:
                     'image_path': image_path,
                     'confidence_threshold': confidence_threshold,
                 })
-                faces: List[dict] = []
+                faces: Optional[List[dict]] = None  # default = timed out
                 deadline = time.time() + timeout_per_image
                 while time.time() < deadline:
                     try:
@@ -217,9 +227,12 @@ class VisionProcessManager:
                                 faces = msg.get('results', [])
                             elif msg['type'] == MSG_ERROR:
                                 logger.error(f'Vision batch error: {msg.get("error")}')
+                                faces = None
                             break
                     except Exception:
                         continue
+                if faces is None:
+                    logger.warning(f'Vision batch: timeout for {image_path}')
                 batch_results.append(faces)
             return batch_results
 

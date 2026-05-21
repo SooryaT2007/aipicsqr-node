@@ -269,14 +269,19 @@ class MeshWorker:
             jid      = job['job_id']
             photo_id = job['photo_id']
             try:
-                self.api.complete_job(
-                    jid, photo_id, faces or [],
-                    started_at=started_ats[jid],
-                    completed_at=completed_at,
-                )
-                logger.debug(f'Mesh: {jid[:8]} done — {len(faces or [])} face(s)')
+                if faces is None:
+                    # Timeout or subprocess crash — let server retry on another node
+                    self.api.fail_job(jid, 'Vision inference timed out')
+                    logger.warning(f'Mesh: {jid[:8]} failed — inference timeout')
+                else:
+                    self.api.complete_job(
+                        jid, photo_id, faces,
+                        started_at=started_ats[jid],
+                        completed_at=completed_at,
+                    )
+                    logger.debug(f'Mesh: {jid[:8]} done — {len(faces)} face(s)')
             except Exception as e:
-                logger.error(f'Mesh: {jid[:8]} complete failed: {e}')
+                logger.error(f'Mesh: {jid[:8]} complete/fail API call failed: {e}')
 
     # ── Selfie thread (dedicated, higher priority than vectoring) ─────────────
 
