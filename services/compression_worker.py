@@ -159,6 +159,8 @@ class CompressionWorker:
             gdrive_file_id = None
             if storage == 'gdrive':
                 gdrive_file_id = self._upload_to_gdrive(event_id, filename, compressed_bytes)
+                if not gdrive_file_id:
+                    raise RuntimeError('GDrive upload returned no file ID — job will retry')
             elif storage == 'r2':
                 main_url = job.get('main_upload_url')
                 if main_url:
