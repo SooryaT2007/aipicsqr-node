@@ -49,7 +49,8 @@ _r2_session.mount('https://', HTTPAdapter(max_retries=Retry(
 
 _IDLE_POLL_MIN = 5
 _IDLE_POLL_MAX = 60
-_DOWNLOAD_TIMEOUT = 90  # GDrive originals can be large
+_DOWNLOAD_TIMEOUT  = 90   # GDrive originals can be large
+_DOWNLOAD_ATTEMPTS = 3    # retry transient connection errors
 
 
 class CompressionWorker:
@@ -116,12 +117,10 @@ class CompressionWorker:
 
         tmp_path = None
         try:
-            # STEP 1: Download original from GDrive
+            # STEP 1: Download original from GDrive (retry on transient errors)
             download_url = job['download_url']
             logger.info(f'  Downloading {filename}...')
-            resp = requests.get(download_url, timeout=_DOWNLOAD_TIMEOUT)
-            resp.raise_for_status()
-            original_bytes = resp.content
+            original_bytes = self._download_with_retry(download_url)
             logger.info(f'  Downloaded: {len(original_bytes) / 1024:.0f} KB')
 
             # Write to a temp file so Pillow can open it
@@ -197,6 +196,31 @@ class CompressionWorker:
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+
+    # ── Download with retry ───────────────────────────────────────────────────
+
+    def _download_with_retry(self, url: str) -> bytes:
+        """GET with retry on 429/503 and connection errors. Raises on final failure."""
+        delay    = 2.0
+        last_exc: Exception | None = None
+        for attempt in range(_DOWNLOAD_ATTEMPTS):
+            try:
+                resp = requests.get(url, timeout=_DOWNLOAD_TIMEOUT)
+                if resp.status_code in (429, 503):
+                    wait = float(resp.headers.get('Retry-After', delay))
+                    logger.warning(f'  Download {resp.status_code} — retrying in {wait:.0f}s')
+                    time.sleep(wait)
+                    delay = min(delay * 2, 30.0)
+                    continue
+                resp.raise_for_status()
+                return resp.content
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                last_exc = e
+                logger.warning(f'  Download connection error (attempt {attempt + 1}): {e}')
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
+        raise last_exc or RuntimeError('Download failed after retries')
 
     # ── GDrive upload (reuses uploader cache pattern) ─────────────────────────
 

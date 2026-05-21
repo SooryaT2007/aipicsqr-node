@@ -240,3 +240,9 @@ class UploadStateDB:
         with self._lock:
             self._conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')  # flush WAL before close
             self._conn.close()
+
+    def __del__(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass

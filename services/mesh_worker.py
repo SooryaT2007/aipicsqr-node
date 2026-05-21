@@ -233,9 +233,9 @@ class MeshWorker:
                 continue
             started_ats[jid] = datetime.now(timezone.utc).isoformat()
             tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+            tmp_paths[jid] = tmp.name  # register before write so finally always cleans up
             tmp.write(img)
             tmp.close()
-            tmp_paths[jid] = tmp.name
 
         if not tmp_paths:
             return

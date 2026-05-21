@@ -72,14 +72,25 @@ class GDriveUploader:
             logger.warning(f'GDrive makeFilePublic {file_id[:8]}: {resp.status_code}')
 
     def _post(self, url: str, headers: dict, data: bytes) -> requests.Response:
-        """POST with exponential backoff on 429 / 503."""
-        delay = 1.0
-        resp  = None
+        """POST with exponential backoff on 429/503 and connection errors."""
+        delay    = 1.0
+        resp     = None
+        last_exc: Exception | None = None
         for attempt in range(6):
-            resp = requests.post(url, headers=headers, data=data, timeout=60)
+            try:
+                resp = requests.post(url, headers=headers, data=data, timeout=60)
+                last_exc = None
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                last_exc = e
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
+                continue
             if resp.status_code not in (429, 503) or attempt == 5:
                 return resp
             retry_after = float(resp.headers.get('Retry-After', delay))
             time.sleep(retry_after)
             delay = min(delay * 2, 30.0)
+        if last_exc:
+            raise last_exc
         return resp  # type: ignore[return-value]

@@ -236,27 +236,23 @@ class VisionProcessManager:
                 batch_results.append(faces)
             return batch_results
 
-    def process_image(self, image_path: str, confidence_threshold: float = 0.7, timeout: float = 30.0) -> List[dict]:
+    def process_image(self, image_path: str, confidence_threshold: float = 0.7, timeout: float = 30.0) -> Optional[List[dict]]:
         """
         Send an image to the vision process for face detection + recognition.
 
-        Args:
-            image_path: Path to the image file
-            confidence_threshold: Minimum face detection confidence
-            timeout: Maximum time to wait for results
-
         Returns:
-            List of face results with embeddings
+          list[dict] — face results (empty list means 0 faces detected, valid result)
+          None       — timeout or subprocess crash; caller should fail the job
         """
         with self._call_lock:
             self._ensure_alive()
             if not self.is_ready():
                 logger.warning("Vision process not ready")
-                return []
+                return None
 
             if self.should_delegate():
-                logger.info(f"  âš¡ Delegating {Path(image_path).name} to mesh (resource limit hit)")
-                return []  # Caller should re-queue for mesh processing
+                logger.info(f"  Delegating {Path(image_path).name} to mesh (resource limit hit)")
+                return None
 
             self._task_counter += 1
             task_id = self._task_counter
@@ -268,7 +264,6 @@ class VisionProcessManager:
                 'confidence_threshold': confidence_threshold,
             })
 
-            # Wait for result
             start = time.time()
             while time.time() - start < timeout:
                 try:
@@ -278,12 +273,12 @@ class VisionProcessManager:
                             return result.get('results', [])
                         elif result['type'] == MSG_ERROR:
                             logger.error(f"Vision error: {result.get('error')}")
-                            return []
+                            return None
                 except Exception:
                     continue
 
             logger.warning(f"Vision process timed out for {image_path}")
-            return []
+            return None
 
     def process_selfie(self, image_data: bytes, timeout: float = 10.0) -> Optional[List[float]]:
         """
