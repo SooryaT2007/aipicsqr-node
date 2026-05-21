@@ -59,7 +59,9 @@ import requests
 logger = logging.getLogger('AIPICSQR-node')
 
 _PREFETCH_AHEAD   = 2     # jobs to download ahead while processing
-_IDLE_POLL_SECS   = 2     # poll interval when buffer is empty
+_IDLE_POLL_MIN    = 2     # starting poll interval when buffer is empty
+_IDLE_POLL_MAX    = 30    # ceiling for vectoring backoff (seconds)
+_SELFIE_IDLE_MAX  = 10    # ceiling for selfie backoff — kept low, guests wait for results
 _DOWNLOAD_TIMEOUT = 60    # seconds for R2 download
 _PREFETCH_WAIT    = 120   # max seconds to wait for an in-flight download
 
@@ -84,6 +86,10 @@ class MeshWorker:
         self._cache: dict[str, Any] = {}
         self._cache_lock = threading.Lock()
         self._organize_thread: Optional[threading.Thread] = None
+
+        # Backoff state — reset to min the moment work is found
+        self._idle_backoff   = _IDLE_POLL_MIN
+        self._selfie_backoff = _IDLE_POLL_MIN
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -122,8 +128,10 @@ class MeshWorker:
                 if is_empty:
                     batch = self._fetch_batch()
                     if not batch:
-                        time.sleep(_IDLE_POLL_SECS)
+                        time.sleep(self._idle_backoff)
+                        self._idle_backoff = min(self._idle_backoff * 2, _IDLE_POLL_MAX)
                         continue
+                    self._idle_backoff = _IDLE_POLL_MIN  # work found — snap back to fast polling
                     with self._buffer_lock:
                         self._buffer.extend(batch)
                     # Kick off prefetch for the first N+1 jobs in buffer
@@ -271,9 +279,11 @@ class MeshWorker:
             try:
                 jobs = self._safe_get_selfie_jobs()
                 if jobs:
+                    self._selfie_backoff = _IDLE_POLL_MIN  # work found — snap back to fast polling
                     self._process_selfie_job(jobs[0])
                 else:
-                    time.sleep(_IDLE_POLL_SECS)
+                    time.sleep(self._selfie_backoff)
+                    self._selfie_backoff = min(self._selfie_backoff * 2, _SELFIE_IDLE_MAX)
             except Exception as e:
                 logger.error(f'Selfie loop error: {e}')
                 time.sleep(5)
