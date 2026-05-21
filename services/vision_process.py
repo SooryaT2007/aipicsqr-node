@@ -178,6 +178,51 @@ class VisionProcessManager:
             return self.resource_monitor.should_pause()
         return False
 
+    def process_image_batch(
+        self,
+        image_paths: List[str],
+        confidence_threshold: float = 0.7,
+        timeout_per_image: float = 30.0,
+    ) -> List[List[dict]]:
+        """Process multiple images sequentially under a single lock acquisition.
+
+        Keeps the vision subprocess continuously busy and avoids repeated
+        lock acquire/release overhead between images in a batch.
+        Selfie wait is bounded by len(image_paths) × timeout_per_image.
+        """
+        if not image_paths:
+            return []
+        with self._call_lock:
+            self._ensure_alive()
+            if not self.is_ready():
+                return [[] for _ in image_paths]
+
+            batch_results: List[List[dict]] = []
+            for image_path in image_paths:
+                self._task_counter += 1
+                task_id = self._task_counter
+                self._task_queue.put({
+                    'type': MSG_PROCESS_IMAGE,
+                    'task_id': task_id,
+                    'image_path': image_path,
+                    'confidence_threshold': confidence_threshold,
+                })
+                faces: List[dict] = []
+                deadline = time.time() + timeout_per_image
+                while time.time() < deadline:
+                    try:
+                        msg = self._result_queue.get(timeout=1.0)
+                        if msg.get('task_id') == task_id:
+                            if msg['type'] == MSG_RESULT:
+                                faces = msg.get('results', [])
+                            elif msg['type'] == MSG_ERROR:
+                                logger.error(f'Vision batch error: {msg.get("error")}')
+                            break
+                    except Exception:
+                        continue
+                batch_results.append(faces)
+            return batch_results
+
     def process_image(self, image_path: str, confidence_threshold: float = 0.7, timeout: float = 30.0) -> List[dict]:
         """
         Send an image to the vision process for face detection + recognition.

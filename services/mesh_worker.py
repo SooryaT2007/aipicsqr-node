@@ -58,7 +58,7 @@ import requests
 
 logger = logging.getLogger('AIPICSQR-node')
 
-_PREFETCH_AHEAD   = 2     # jobs to download ahead while processing
+_VISION_BATCH     = 4     # max images per lock acquisition (bounds selfie wait to ~80 s)
 _IDLE_POLL_MIN    = 2     # starting poll interval when buffer is empty
 _IDLE_POLL_MAX    = 30    # ceiling for vectoring backoff (seconds)
 _SELFIE_IDLE_MAX  = 10    # ceiling for selfie backoff — kept low, guests wait for results
@@ -131,25 +131,23 @@ class MeshWorker:
                         time.sleep(self._idle_backoff)
                         self._idle_backoff = min(self._idle_backoff * 2, _IDLE_POLL_MAX)
                         continue
-                    self._idle_backoff = _IDLE_POLL_MIN  # work found — snap back to fast polling
+                    self._idle_backoff = _IDLE_POLL_MIN
                     with self._buffer_lock:
                         self._buffer.extend(batch)
-                    # Kick off prefetch for the first N+1 jobs in buffer
+                    # Prefetch all jobs in buffer at once so downloads overlap inference
                     with self._buffer_lock:
-                        ahead = list(self._buffer)[:_PREFETCH_AHEAD + 1]
-                    self._prefetch(ahead)
+                        all_pending = list(self._buffer)
+                    self._prefetch(all_pending)
 
+                # Take up to _VISION_BATCH jobs for one lock acquisition
                 with self._buffer_lock:
-                    if not self._buffer:
-                        continue
-                    job = self._buffer.popleft()
-                    # Prefetch next jobs while this one is being processed
-                    ahead = list(self._buffer)[:_PREFETCH_AHEAD]
+                    to_process = [
+                        self._buffer.popleft()
+                        for _ in range(min(_VISION_BATCH, len(self._buffer)))
+                    ]
 
-                if ahead:
-                    self._prefetch(ahead)
-
-                self._process_job(job)
+                if to_process:
+                    self._process_batch_jobs(to_process)
 
             except Exception as e:
                 logger.error(f'Mesh worker loop error: {e}')
@@ -218,53 +216,67 @@ class MeshWorker:
 
         return val if val else None
 
-    # ── Vectoring job ──────────────────────────────────────────────────────────
+    # ── Vectoring batch ────────────────────────────────────────────────────────
 
-    def _process_job(self, job: dict):
-        jid = job['job_id']
-        photo_id = job['photo_id']
-        urgent = job.get('is_urgent', False)
+    def _process_batch_jobs(self, jobs: list):
+        """Download all images in the batch, then run inference under one lock."""
+        tmp_paths:   dict[str, str] = {}   # job_id → temp file path
+        started_ats: dict[str, str] = {}   # job_id → ISO timestamp
 
-        logger.debug(f'Mesh: vectoring {jid[:8]} (urgent={urgent})')
-
-        try:
+        # Wait for each prefetched download (or download synchronously if missed)
+        for job in jobs:
+            jid = job['job_id']
             img = self._get_image(job)
             if not img:
                 logger.error(f'Mesh: {jid[:8]} — download produced no data')
                 self.api.fail_job(jid, 'Download failed')
-                return
+                continue
+            started_ats[jid] = datetime.now(timezone.utc).isoformat()
+            tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+            tmp.write(img)
+            tmp.close()
+            tmp_paths[jid] = tmp.name
 
-            # Record start time after download — this is the true per-image
-            # processing start. claimed_at is shared across the whole batch so
-            # using it would inflate avg_job_ms for every job after the first.
-            started_at = datetime.now(timezone.utc).isoformat()
+        if not tmp_paths:
+            return
 
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                tmp.write(img)
-                tmp_path = tmp.name
+        # Process all downloaded images under a single lock acquisition
+        ready_jobs  = [j for j in jobs if j['job_id'] in tmp_paths]
+        ready_paths = [tmp_paths[j['job_id']] for j in ready_jobs]
 
-            try:
-                face_results = self.vision_manager.process_image(
-                    tmp_path,
-                    confidence_threshold=self.config.face_confidence_threshold,
-                )
-            finally:
-                os.unlink(tmp_path)
-
-            completed_at = datetime.now(timezone.utc).isoformat()
-            self.api.complete_job(jid, photo_id, face_results or [],
-                                  started_at=started_at, completed_at=completed_at)
-
-            face_count = len(face_results or [])
-            logger.debug(f'Mesh: {jid[:8]} done — {face_count} face(s)')
-
+        try:
+            all_faces = self.vision_manager.process_image_batch(
+                ready_paths,
+                confidence_threshold=self.config.face_confidence_threshold,
+            )
         except Exception as e:
-            logger.error(f'Mesh: {jid[:8]} failed: {e}')
-            self.api.fail_job(jid, str(e))
-
+            for job in ready_jobs:
+                logger.error(f'Mesh: batch inference error for {job["job_id"][:8]}: {e}')
+                self.api.fail_job(job['job_id'], str(e))
+            return
         finally:
+            for p in ready_paths:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
             with self._cache_lock:
-                self._cache.pop(jid, None)
+                for job in jobs:
+                    self._cache.pop(job['job_id'], None)
+
+        completed_at = datetime.now(timezone.utc).isoformat()
+        for job, faces in zip(ready_jobs, all_faces):
+            jid      = job['job_id']
+            photo_id = job['photo_id']
+            try:
+                self.api.complete_job(
+                    jid, photo_id, faces or [],
+                    started_at=started_ats[jid],
+                    completed_at=completed_at,
+                )
+                logger.debug(f'Mesh: {jid[:8]} done — {len(faces or [])} face(s)')
+            except Exception as e:
+                logger.error(f'Mesh: {jid[:8]} complete failed: {e}')
 
     # ── Selfie thread (dedicated, higher priority than vectoring) ─────────────
 
