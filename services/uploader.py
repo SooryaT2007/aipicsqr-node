@@ -6,9 +6,18 @@ Pipeline for processing a new photo:
 2. Compress the image + generate thumbnail (Pillow)
 3. Get presigned R2 URLs from the API (main image + thumbnail)
 4. PUT both files directly to R2 (bypasses our server — no Vercel bandwidth used)
-5. Mark r2_done in SQLite (stores batch metadata for crash recovery)
-6. Accumulate completions in a batch; flush every 10 photos or 5 seconds via the
+5. If folder storage_type='gdrive': upload main photo directly to GDrive from
+   local bytes (same bytes just compressed — no extra download).  The node caches
+   the GDrive token + folder IDs per event so this costs one API call per
+   ~55-minute window, not one per photo.
+6. Mark r2_done in SQLite (stores batch metadata for crash recovery)
+7. Accumulate completions in a batch; flush every 10 photos or 5 seconds via the
    batch API endpoint (reduces Vercel invocations ~50x during bulk dumps)
+
+For GDrive storage folders the batch entry includes gdrive_file_id, which makes
+the server set asset_status='SYNCED_HOT' immediately.  The drive-sync cron then
+only needs to delete the R2 main photo after vectoring completes (fast-path),
+instead of streaming the whole file through Vercel.
 
 Crash recovery: if the process exits after step 4 but before the batch
 notification completes, recover_r2_done() re-sends those notifications on the
@@ -17,12 +26,13 @@ next startup without re-compressing or re-uploading anything.
 Face detection is NOT done here. It runs in MeshWorker on whichever node
 the server assigns as best — completely independent of who uploaded the photo.
 
-folder_info dict: {id, event_id, path, pool_type, watch_until}
+folder_info dict: {id, event_id, path, pool_type, watch_until, storage_type}
 """
 
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +41,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.compressor import compress_image_with_thumbnail
+from services.gdrive_uploader import GDriveUploader
 from services.upload_state import UploadStateDB
 
 _r2_session = requests.Session()
@@ -60,6 +71,10 @@ class PhotoUploader:
         self._batch_threads: list[threading.Thread] = []
         self._batch_threads_lock = threading.Lock()
 
+        # GDrive config cache: event_id → {access_token, folder_id, expires_at}
+        self._gdrive_cache: dict[str, dict] = {}
+        self._gdrive_cache_lock = threading.Lock()
+
         self._start_flush_timer()
 
     # ── Startup recovery ──────────────────────────────────────────────────────
@@ -74,13 +89,11 @@ class PhotoUploader:
             return
         logger.info(f'Recovery: {len(entries)} file(s) reached R2 but were not confirmed '
                     f'before last shutdown — re-sending notifications now...')
-        # Reconstruct thumbnail_url from key where possible
         for e in entries:
             if e.get('thumbnail_key') and hasattr(self.config, 'r2_public_base'):
                 e['thumbnail_url'] = f"{self.config.r2_public_base}/{e['thumbnail_key']}"
             else:
                 e['thumbnail_url'] = None
-        # Process in chunks matching configured batch size
         size = self.config.upload_batch_size
         for i in range(0, len(entries), size):
             self._send_batch(entries[i:i + size])  # synchronous — no thread
@@ -105,6 +118,8 @@ class PhotoUploader:
                 return
         else:
             file_hash = None
+
+        storage_type = (folder_info or {}).get('storage_type', 'r2')
 
         try:
             if self._state_db and file_hash:
@@ -138,7 +153,7 @@ class PhotoUploader:
             thumbnail_url_r2 = presign.get('thumbnail_upload_url')
             thumb_key        = presign.get('thumbnail_key')
 
-            # STEP 3: PUT main image to R2
+            # STEP 3: PUT main image to R2 (staging for vectoring)
             logger.info(f'  Uploading {path.name}...')
             _r2_session.put(
                 upload_url,
@@ -163,9 +178,14 @@ class PhotoUploader:
                     logger.debug(f'  Thumbnail upload failed (non-fatal): {e}')
                     thumb_key = None
 
-            # STEP 5: Persist r2_done + batch data BEFORE enqueueing.
-            # If the process exits between here and mark_complete, recover_r2_done()
-            # re-sends the notification on next startup without re-compressing.
+            # STEP 5: Upload main photo directly to GDrive (gdrive storage folders only).
+            # The node already has compressed_bytes in memory so no re-download needed.
+            # Non-fatal: if GDrive upload fails the drive-sync cron handles it instead.
+            gdrive_file_id = None
+            if storage_type == 'gdrive':
+                gdrive_file_id = self._upload_to_gdrive(event_id, path.name, compressed_bytes)
+
+            # STEP 6: Persist r2_done + batch data BEFORE enqueueing.
             if self._state_db and file_hash:
                 self._state_db.mark_r2_done(
                     file_path, photo_id=photo_id,
@@ -180,15 +200,55 @@ class PhotoUploader:
                 'height':          height,
                 'thumbnail_key':   thumb_key,
                 'thumbnail_url':   thumb_public_url,
+                'gdrive_file_id':  gdrive_file_id,
                 '_file_path':      file_path,
             }
             self._enqueue_batch(entry)
-            logger.info(f'  Done: {path.name} (batched)')
+            suffix = f' → GDrive {gdrive_file_id[:8]}' if gdrive_file_id else ''
+            logger.info(f'  Done: {path.name} (batched{suffix})')
 
         except Exception as e:
             logger.error(f'  Failed to process {path.name}: {e}')
             if self._state_db and file_hash:
                 self._state_db.mark_failed(file_path)
+
+    # ── GDrive direct upload ──────────────────────────────────────────────────
+
+    def _upload_to_gdrive(self, event_id: str, filename: str, data: bytes) -> str | None:
+        """Upload bytes to GDrive. Returns file_id or None on any failure."""
+        try:
+            cfg = self._get_gdrive_config(event_id)
+            if not cfg:
+                return None
+            uploader = GDriveUploader(cfg['access_token'], cfg['folder_id'])
+            file_id = uploader.upload(filename, data)
+            logger.debug(f'  GDrive: {filename} → {file_id[:8]}')
+            return file_id
+        except Exception as e:
+            logger.warning(f'  GDrive upload failed — cron will handle it: {e}')
+            return None
+
+    def _get_gdrive_config(self, event_id: str) -> dict | None:
+        """Return cached GDrive config, fetching a fresh one if missing or expired."""
+        now = datetime.now(timezone.utc)
+        with self._gdrive_cache_lock:
+            cfg = self._gdrive_cache.get(event_id)
+            if cfg:
+                try:
+                    expiry = datetime.fromisoformat(cfg['expires_at'].replace('Z', '+00:00'))
+                    if now < expiry:
+                        return cfg
+                except Exception:
+                    pass
+
+        try:
+            fresh = self.api.get_gdrive_upload_config(event_id)
+            with self._gdrive_cache_lock:
+                self._gdrive_cache[event_id] = fresh
+            return fresh
+        except Exception as e:
+            logger.warning(f'  Could not get GDrive upload config: {e}')
+            return None
 
     # ── Batch flush ───────────────────────────────────────────────────────────
 
@@ -220,7 +280,6 @@ class PhotoUploader:
                         self._state_db.mark_complete(entry['_file_path'], entry['photo_id'])
             except Exception as e:
                 logger.warning(f'  Batch complete failed ({len(batch)} photos): {e}')
-                # Fallback: notify individually
                 for entry in batch:
                     try:
                         self.api.upload_complete(
@@ -239,7 +298,7 @@ class PhotoUploader:
                 try:
                     self._batch_threads.remove(threading.current_thread())
                 except ValueError:
-                    pass  # called synchronously from recover_r2_done — not in the list
+                    pass
 
     def _timer_flush(self):
         with self._batch_lock:
@@ -255,12 +314,8 @@ class PhotoUploader:
     def stop(self):
         if self._flush_timer:
             self._flush_timer.cancel()
-        # Final flush of any items still in the batch buffer
         with self._batch_lock:
             self._flush_locked()
-        # Wait for all in-flight batch-send threads to finish (up to 30 s each).
-        # Without this, daemon threads are killed by the process exit before they
-        # can call mark_complete, leaving files stuck in r2_done state.
         with self._batch_threads_lock:
             threads = list(self._batch_threads)
         for t in threads:

@@ -433,6 +433,42 @@ class APIClient:
         except Exception:
             pass
 
+    # ── GDrive node helpers ───────────────────────────────────────────────────
+
+    def get_gdrive_upload_config(self, event_id: str) -> dict:
+        """
+        Fetch a fresh GDrive access token + folder IDs for the given event.
+        Returns {'access_token', 'folder_id', 'thumbs_folder_id', 'expires_at'}.
+        Called once per event per ~55-minute window (caller must cache by expires_at).
+        Raises on error (caller treats GDrive upload as non-fatal and falls back).
+        """
+        resp = self._post(
+            f'{self._config.api_base_url}/api/node/gdrive/upload-config',
+            json={**self._auth(), 'event_id': event_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def sync_gdrive_folder(self, folder_id: str) -> int:
+        """
+        Ask the server to check a GDrive-source folder for new photos.
+        Creates photo records + vectoring_jobs for any newly detected files.
+        Returns the count of new photos queued (0 = nothing new).
+        Non-raising: returns 0 on any error so the polling loop keeps going.
+        """
+        try:
+            resp = self._post(
+                f'{self._config.api_base_url}/api/node/gdrive/sync-folder',
+                json={**self._auth(), 'folder_id': folder_id},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get('new_photos', 0)
+        except Exception as e:
+            logger.debug(f'sync_gdrive_folder {folder_id[:8]}: {e}')
+            return 0
+
     # ── Graceful shutdown ─────────────────────────────────────────────────────
 
     def go_offline(self) -> None:
