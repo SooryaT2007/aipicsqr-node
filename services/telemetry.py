@@ -66,7 +66,7 @@ class TelemetryService:
 
             # Update config's performance_score so MeshWorker can read it
             score = data.get('performance_score')
-            if isinstance(score, int) and score > 0:
+            if isinstance(score, int) and score >= 0:
                 self.config.performance_score = score
 
             if data.get('status') == 'registered' and data.get('node_id'):

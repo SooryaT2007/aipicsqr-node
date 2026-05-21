@@ -27,11 +27,12 @@ class ResourceMonitor:
     """
     Monitors CPU usage and temperature, signaling when resources
     should be conserved.
-    
-    Thresholds:
-        - CPU > 90%: Pause processing
-        - Temperature > 85Â°C: Pause processing  
-        - Cooldown: 30 seconds before retry
+
+    Threshold:
+        - Temperature > 85C: Pause vision processing until cooldown passes
+        - CPU% is tracked for telemetry but does not trigger pausing
+          (temperature-based pausing is more reliable on laptops)
+        - Cooldown: 30 seconds before resuming after a thermal pause
     """
 
     def __init__(
