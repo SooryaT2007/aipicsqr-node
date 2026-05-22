@@ -29,6 +29,7 @@ the server assigns as best — completely independent of who uploaded the photo.
 folder_info dict: {id, event_id, path, pool_type, watch_until, storage_type}
 """
 
+import concurrent.futures
 import logging
 import os
 import tempfile
@@ -149,49 +150,35 @@ class PhotoUploader:
             logger.info(f'  Compressed: {file_size / 1024:.0f} KB ({width}x{height}), '
                         f'thumb: {len(thumbnail_bytes) / 1024:.0f} KB')
 
-            # TRICKLE VECTORIZATION (OPT-13):
-            # Only for watchdog-detected new files (priority=0) in Keep-Watching
-            # folders when the upload queue is shallow — meaning photos are arriving
-            # one at a time rather than in a bulk dump.  In that case we have spare
-            # CPU, the image is already in memory, and we can vectorize inline without
-            # waiting for a mesh node to download from R2.
-            # All other paths (import-once, initial-scan backlog) keep priority > 0
-            # and always fall back to the mesh job queue.
-            local_faces = None
-            if (
+            # STEP 2: Get presigned URLs + trickle vectorization (OPT-13).
+            # For trickle-mode photos (Keep-Watching watchdog, shallow queue) we run
+            # presign and ONNX inference concurrently: the ~100–200 ms presign
+            # round-trip hides behind inference time so the total wait is just
+            # max(presign, inference) instead of the sum.
+            # All other paths (import-once, initial-scan backlog, resource-limited)
+            # keep priority > 0 or have a non-empty queue, so they always skip to
+            # plain mesh-job vectorization.
+            _is_trickle = (
                 priority == 0
                 and self._vision_manager is not None
                 and self._upload_queue is not None
                 and self._vision_manager.is_ready()
                 and not (self._resource_monitor and self._resource_monitor.should_pause())
                 and self._upload_queue.queue_depth() < _TRICKLE_THRESHOLD
-            ):
-                tmp_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                        tmp.write(compressed_bytes)
-                        tmp_path = tmp.name
-                    local_faces = self._vision_manager.process_image(
-                        tmp_path,
-                        confidence_threshold=self.config.face_confidence_threshold,
-                        timeout=30.0,
+            )
+            local_faces = None
+            if _is_trickle:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                    _presign_f = ex.submit(
+                        self.api.get_upload_url, path.name,
+                        event_id=event_id, folder_id=folder_id,
                     )
-                    if local_faces is None:
-                        logger.warning(f'  Trickle: vision timeout for {path.name} — mesh fallback')
-                    else:
-                        logger.info(f'  Trickle: {len(local_faces)} face(s) in {path.name}')
-                except Exception as e:
-                    logger.warning(f'  Trickle vectorization error for {path.name}: {e} — mesh fallback')
-                    local_faces = None
-                finally:
-                    if tmp_path:
-                        try:
-                            os.unlink(tmp_path)
-                        except Exception:
-                            pass
+                    _vector_f = ex.submit(self._vectorize_trickle, compressed_bytes, path.name)
+                presign    = _presign_f.result()
+                local_faces = _vector_f.result()  # None → fallback to mesh job
+            else:
+                presign = self.api.get_upload_url(path.name, event_id=event_id, folder_id=folder_id)
 
-            # STEP 2: Get presigned URLs (server dedup check)
-            presign = self.api.get_upload_url(path.name, event_id=event_id, folder_id=folder_id)
             if presign.get('already_uploaded'):
                 logger.info(f'  Skipping {path.name} — already uploaded (server dedup)')
                 if self._state_db and file_hash:
@@ -205,37 +192,51 @@ class PhotoUploader:
             thumbnail_url_r2 = presign.get('thumbnail_upload_url')
             thumb_key        = presign.get('thumbnail_key')
 
-            # STEP 3: PUT main image to R2 (staging for vectoring)
+            # STEP 3–5: Upload main image to R2, thumbnail to R2, and optionally to
+            # GDrive — all in parallel so network I/O overlaps.
+            # Main R2 is critical (raises on failure). Thumbnail and GDrive are
+            # best-effort and never block completion of the main upload.
             logger.info(f'  Uploading {path.name}...')
-            _r2_session.put(
-                upload_url,
-                data=compressed_bytes,
-                headers={'Content-Type': 'image/jpeg'},
-                timeout=60,
-            ).raise_for_status()
 
-            # STEP 4: PUT thumbnail to R2 (best-effort — failure is non-fatal)
-            thumb_public_url = None
+            def _r2_main():
+                _r2_session.put(
+                    upload_url, data=compressed_bytes,
+                    headers={'Content-Type': 'image/jpeg'}, timeout=60,
+                ).raise_for_status()
+
+            def _r2_thumb():
+                _r2_session.put(
+                    thumbnail_url_r2, data=thumbnail_bytes,
+                    headers={'Content-Type': 'image/webp'}, timeout=30,
+                ).raise_for_status()
+
+            _upload_tasks = {'main': _r2_main}
             if thumbnail_url_r2 and thumb_key:
+                _upload_tasks['thumb'] = _r2_thumb
+            if storage_type == 'gdrive':
+                _upload_tasks['gdrive'] = lambda: self._upload_to_gdrive(
+                    event_id, path.name, compressed_bytes
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(_upload_tasks)) as ex:
+                _upload_futures = {name: ex.submit(fn) for name, fn in _upload_tasks.items()}
+            # ThreadPoolExecutor.__exit__ waits for all futures — results are ready here.
+
+            _upload_futures['main'].result()  # re-raises on R2 failure
+
+            thumb_public_url = None
+            if 'thumb' in _upload_futures:
                 try:
-                    _r2_session.put(
-                        thumbnail_url_r2,
-                        data=thumbnail_bytes,
-                        headers={'Content-Type': 'image/webp'},
-                        timeout=30,
-                    ).raise_for_status()
+                    _upload_futures['thumb'].result()
                     if hasattr(self.config, 'r2_public_base'):
                         thumb_public_url = f"{self.config.r2_public_base}/{thumb_key}"
                 except Exception as e:
                     logger.debug(f'  Thumbnail upload failed (non-fatal): {e}')
                     thumb_key = None
 
-            # STEP 5: Upload main photo directly to GDrive (gdrive storage folders only).
-            # The node already has compressed_bytes in memory so no re-download needed.
-            # Non-fatal: if GDrive upload fails the drive-sync cron handles it instead.
             gdrive_file_id = None
-            if storage_type == 'gdrive':
-                gdrive_file_id = self._upload_to_gdrive(event_id, path.name, compressed_bytes)
+            if 'gdrive' in _upload_futures:
+                gdrive_file_id = _upload_futures['gdrive'].result()  # _upload_to_gdrive never raises
 
             # STEP 6: Persist r2_done + batch data BEFORE enqueueing.
             if self._state_db and file_hash:
@@ -306,6 +307,37 @@ class PhotoUploader:
         except Exception as e:
             logger.warning(f'  Could not get GDrive upload config: {e}')
             return None
+
+    # ── Trickle vectorization ─────────────────────────────────────────────────
+
+    def _vectorize_trickle(self, compressed_bytes: bytes, filename: str) -> Optional[list]:
+        """Write compressed bytes to a temp file and run inline face detection.
+        Returns list of face dicts (possibly empty) or None on timeout/failure
+        (caller falls back to creating a mesh job instead)."""
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                tmp.write(compressed_bytes)
+                tmp_path = tmp.name
+            faces = self._vision_manager.process_image(
+                tmp_path,
+                confidence_threshold=self.config.face_confidence_threshold,
+                timeout=30.0,
+            )
+            if faces is None:
+                logger.warning(f'  Trickle: vision timeout for {filename} — mesh fallback')
+            else:
+                logger.info(f'  Trickle: {len(faces)} face(s) in {filename}')
+            return faces
+        except Exception as e:
+            logger.warning(f'  Trickle vectorization error for {filename}: {e} — mesh fallback')
+            return None
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
     # ── Batch flush ───────────────────────────────────────────────────────────
 
