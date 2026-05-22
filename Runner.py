@@ -152,6 +152,8 @@ def main():
         api_client=api,
         vision_manager=vision_manager,
         state_db=state_db,
+        upload_queue=upload_queue,
+        resource_monitor=resource_monitor,
     )
     upload_queue.worker_fn = uploader.process_photo
     upload_queue.start()

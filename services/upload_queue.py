@@ -117,7 +117,7 @@ class UploadQueue:
     def _run_task(self, task: UploadTask) -> None:
         try:
             if self.worker_fn:
-                self.worker_fn(task.file_path, task.folder_info)
+                self.worker_fn(task.file_path, task.folder_info, task.priority)
             self._record_completion(task, success=True)
         except Exception:
             self._record_completion(task, success=False)

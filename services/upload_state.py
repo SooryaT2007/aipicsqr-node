@@ -176,16 +176,23 @@ class UploadStateDB:
 
     def mark_r2_done(self, file_path: str, photo_id: Optional[str] = None,
                      file_size_bytes: int = 0, width: int = 0, height: int = 0,
-                     thumbnail_key: Optional[str] = None):
+                     thumbnail_key: Optional[str] = None,
+                     face_vectors: Optional[list] = None):
         """Mark file as uploaded to R2. Stores batch data so it can be recovered if
         the process exits before the batch notification API call completes."""
-        batch_data = json.dumps({
-            'photo_id':        photo_id,
-            'file_size_bytes': file_size_bytes,
-            'width':           width,
-            'height':          height,
-            'thumbnail_key':   thumbnail_key,
-        }) if photo_id else None
+        if photo_id:
+            d: dict = {
+                'photo_id':        photo_id,
+                'file_size_bytes': file_size_bytes,
+                'width':           width,
+                'height':          height,
+                'thumbnail_key':   thumbnail_key,
+            }
+            if face_vectors is not None:
+                d['face_vectors'] = face_vectors
+            batch_data = json.dumps(d)
+        else:
+            batch_data = None
         with self._lock:
             self._conn.execute(
                 "UPDATE uploaded_files SET status='r2_done', photo_id=?, batch_data=? WHERE file_path=?",

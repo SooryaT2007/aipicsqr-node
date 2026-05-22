@@ -30,11 +30,18 @@ folder_info dict: {id, event_id, path, pool_type, watch_until, storage_type}
 """
 
 import logging
+import os
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# Photos arriving via watchdog with fewer than this many items pending in the
+# upload queue are candidates for local (inline) vectorization — no mesh job
+# created, no R2 re-download required.
+_TRICKLE_THRESHOLD = 5
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -57,10 +64,14 @@ logger = logging.getLogger('AIPICSQR-node')
 
 class PhotoUploader:
     def __init__(self, config, api_client, vision_manager=None,
-                 state_db: Optional[UploadStateDB] = None):
+                 state_db: Optional[UploadStateDB] = None,
+                 upload_queue=None, resource_monitor=None):
         self.config = config
         self.api = api_client
         self._state_db = state_db
+        self._vision_manager = vision_manager
+        self._resource_monitor = resource_monitor
+        self._upload_queue = upload_queue
 
         self._batch: list[dict] = []
         self._batch_lock = threading.Lock()
@@ -101,7 +112,7 @@ class PhotoUploader:
 
     # ── Public ────────────────────────────────────────────────────────────────
 
-    def process_photo(self, file_path: str, folder_info: dict | None = None):
+    def process_photo(self, file_path: str, folder_info: dict | None = None, priority: int = 0):
         path = Path(file_path)
         event_id = (folder_info or {}).get('event_id') or self.config.event_id
         folder_id = (folder_info or {}).get('id')
@@ -137,6 +148,47 @@ class PhotoUploader:
             file_size = len(compressed_bytes)
             logger.info(f'  Compressed: {file_size / 1024:.0f} KB ({width}x{height}), '
                         f'thumb: {len(thumbnail_bytes) / 1024:.0f} KB')
+
+            # TRICKLE VECTORIZATION (OPT-13):
+            # Only for watchdog-detected new files (priority=0) in Keep-Watching
+            # folders when the upload queue is shallow — meaning photos are arriving
+            # one at a time rather than in a bulk dump.  In that case we have spare
+            # CPU, the image is already in memory, and we can vectorize inline without
+            # waiting for a mesh node to download from R2.
+            # All other paths (import-once, initial-scan backlog) keep priority > 0
+            # and always fall back to the mesh job queue.
+            local_faces = None
+            if (
+                priority == 0
+                and self._vision_manager is not None
+                and self._upload_queue is not None
+                and self._vision_manager.is_ready()
+                and not (self._resource_monitor and self._resource_monitor.should_pause())
+                and self._upload_queue.queue_depth() < _TRICKLE_THRESHOLD
+            ):
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                        tmp.write(compressed_bytes)
+                        tmp_path = tmp.name
+                    local_faces = self._vision_manager.process_image(
+                        tmp_path,
+                        confidence_threshold=self.config.face_confidence_threshold,
+                        timeout=30.0,
+                    )
+                    if local_faces is None:
+                        logger.warning(f'  Trickle: vision timeout for {path.name} — mesh fallback')
+                    else:
+                        logger.info(f'  Trickle: {len(local_faces)} face(s) in {path.name}')
+                except Exception as e:
+                    logger.warning(f'  Trickle vectorization error for {path.name}: {e} — mesh fallback')
+                    local_faces = None
+                finally:
+                    if tmp_path:
+                        try:
+                            os.unlink(tmp_path)
+                        except Exception:
+                            pass
 
             # STEP 2: Get presigned URLs (server dedup check)
             presign = self.api.get_upload_url(path.name, event_id=event_id, folder_id=folder_id)
@@ -191,6 +243,7 @@ class PhotoUploader:
                     file_path, photo_id=photo_id,
                     file_size_bytes=file_size, width=width, height=height,
                     thumbnail_key=thumb_key,
+                    face_vectors=local_faces,
                 )
 
             entry = {
@@ -203,6 +256,10 @@ class PhotoUploader:
                 'gdrive_file_id':  gdrive_file_id,
                 '_file_path':      file_path,
             }
+            # Include locally-detected face vectors so the server can write them
+            # directly and skip creating a mesh vectoring_job for this photo.
+            if local_faces is not None:
+                entry['face_vectors'] = local_faces
             self._enqueue_batch(entry)
             suffix = f' → GDrive {gdrive_file_id[:8]}' if gdrive_file_id else ''
             logger.info(f'  Done: {path.name} (batched{suffix})')
