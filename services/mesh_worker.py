@@ -56,6 +56,8 @@ from typing import Any, Optional
 
 import requests
 
+from config import NODE_VERSION
+
 logger = logging.getLogger('AIPICSQR-node')
 
 _VISION_BATCH     = 4     # max images per lock acquisition (bounds selfie wait to ~80 s)
@@ -69,7 +71,8 @@ _PENDING = object()       # sentinel: download thread is in flight
 
 
 class MeshWorker:
-    def __init__(self, config, api_client, vision_manager, resource_monitor):
+    def __init__(self, config, api_client, vision_manager, resource_monitor,
+                 on_update_available=None):
         self.config = config
         self.api = api_client
         self.vision_manager = vision_manager
@@ -90,6 +93,10 @@ class MeshWorker:
         # Backoff state — reset to min the moment work is found
         self._idle_backoff   = _IDLE_POLL_MIN
         self._selfie_backoff = _IDLE_POLL_MIN
+
+        # OPT-20: called once when the server returns a newer node version
+        self._on_update_available = on_update_available
+        self._update_triggered = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -157,7 +164,22 @@ class MeshWorker:
 
     def _fetch_batch(self) -> list:
         try:
-            return self.api.pull_jobs()
+            jobs, latest_version, download_url = self.api.pull_jobs()
+            # OPT-20: trigger auto-update once when the server signals a newer version
+            if (
+                not self._update_triggered
+                and latest_version
+                and latest_version != NODE_VERSION
+                and download_url
+                and self._on_update_available
+            ):
+                self._update_triggered = True
+                logger.info(
+                    f'Update available: v{NODE_VERSION} → v{latest_version}. '
+                    'Staging download in background...'
+                )
+                self._on_update_available(download_url, latest_version)
+            return jobs
         except Exception as e:
             logger.debug(f'Mesh: pull_jobs error: {e}')
             return []

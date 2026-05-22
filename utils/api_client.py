@@ -270,13 +270,16 @@ class APIClient:
 
     # ── Mesh jobs ─────────────────────────────────────────────────────────────
 
-    def pull_jobs(self) -> list:
+    def pull_jobs(self) -> tuple[list, str | None, str | None]:
         """
         Atomically claim vectoring jobs via pull_vector_tasks (SKIP LOCKED).
         Batch size is determined entirely by the server from the stored
         performance_score — the node does not calculate or send one.
-        Returns a list of pre-claimed job dicts: job_id, photo_id, r2_url,
-        assigned_at, is_urgent.
+
+        Returns (jobs, latest_version, download_url).
+          jobs            — list of pre-claimed job dicts
+          latest_version  — newest node version the server knows about, or None
+          download_url    — URL of the update zip, or None
         """
         payload = {**self._auth(), 'node_version': NODE_VERSION}
         resp = self._post(
@@ -285,7 +288,12 @@ class APIClient:
             timeout=15,
         )
         resp.raise_for_status()
-        return resp.json().get('jobs', [])
+        data = resp.json()
+        return (
+            data.get('jobs', []),
+            data.get('latest_version'),
+            data.get('latest_download_url'),
+        )
 
     def complete_job(
         self,

@@ -289,7 +289,7 @@ class VisionProcessManager:
             timeout: Maximum wait time
 
         Returns:
-            512-dim embedding list or None
+            128-dim embedding list or None
         """
         with self._call_lock:
             self._ensure_alive()

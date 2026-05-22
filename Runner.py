@@ -35,6 +35,7 @@ from services.vision_process import VisionProcessManager
 from services.resource_monitor import ResourceMonitor
 from services.mesh_worker import MeshWorker
 from services.compression_worker import CompressionWorker
+from services.auto_updater import AutoUpdater
 
 BASE_DIR = Path(__file__).parent
 LOG_DIR  = BASE_DIR / 'logs'
@@ -196,11 +197,14 @@ def main():
     telemetry.start()
     logger.info('OK Telemetry started (60 s pulse + startup benchmark)')
 
+    auto_updater = AutoUpdater()
+
     mesh_worker = MeshWorker(
         config=config,
         api_client=api,
         vision_manager=vision_manager,
         resource_monitor=resource_monitor,
+        on_update_available=auto_updater.download_and_stage,
     )
     mesh_worker.start()
     logger.info('OK Mesh Worker started')
@@ -214,7 +218,12 @@ def main():
 
     try:
         while not shutdown_event.is_set():
-            shutdown_event.wait(timeout=1.0)
+            # OPT-20: apply staged update when the upload queue drains
+            if auto_updater.has_staged() and upload_queue.queue_depth() == 0 and upload_queue.active_count() == 0:
+                logger.info('Upload queue idle — applying staged update now.')
+                shutdown_event.set()
+                break
+            shutdown_event.wait(timeout=5.0)
     finally:
         logger.info('Stopping services...')
         api.go_offline()
@@ -228,6 +237,9 @@ def main():
         vision_manager.stop()
         resource_monitor.stop()
         state_db.close()
+        # OPT-20: launch the update batch script after all services have stopped
+        if auto_updater.has_staged():
+            auto_updater.run_staged()
         logger.info('Goodbye!')
 
 
