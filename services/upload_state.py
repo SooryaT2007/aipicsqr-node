@@ -38,16 +38,20 @@ class UploadStateDB:
             );
         """)
         self._conn.commit()
-        # Safe migrations for columns added after initial release
+        # Safe migrations: applied on every startup; each statement is a no-op if
+        # already applied.  ADD COLUMN fails silently (column exists); CREATE INDEX
+        # uses IF NOT EXISTS so it never raises.
         for stmt in (
             'ALTER TABLE uploaded_files ADD COLUMN batch_data TEXT',
             'ALTER TABLE uploaded_files ADD COLUMN retry_count INTEGER DEFAULT 0',
+            'CREATE INDEX IF NOT EXISTS idx_folder ON uploaded_files(folder_id)',
+            'CREATE INDEX IF NOT EXISTS idx_status  ON uploaded_files(status)',
         ):
             try:
                 self._conn.execute(stmt)
                 self._conn.commit()
             except sqlite3.OperationalError:
-                pass  # column already exists
+                pass  # column already exists (ALTER TABLE branch only)
 
     # ── File hash ────────────────────────────────────────────────────────────
 

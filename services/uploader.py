@@ -23,8 +23,10 @@ Crash recovery: if the process exits after step 4 but before the batch
 notification completes, recover_r2_done() re-sends those notifications on the
 next startup without re-compressing or re-uploading anything.
 
-Face detection is NOT done here. It runs in MeshWorker on whichever node
-the server assigns as best — completely independent of who uploaded the photo.
+Face detection: for trickle photos (priority=0, queue depth < 5) it runs
+inline here and face vectors are sent with the batch notification.  For all
+other photos (import-once, backlog) a vectoring_job is created and the mesh
+node that picks it up runs detection independently.
 
 folder_info dict: {id, event_id, path, pool_type, watch_until, storage_type}
 """
@@ -371,6 +373,18 @@ class PhotoUploader:
                 logger.warning(f'  Batch complete failed ({len(batch)} photos): {e}')
                 for entry in batch:
                     try:
+                        # Warn explicitly when high-value fields are silently dropped by the
+                        # single-photo fallback — face_vectors go to a mesh job instead,
+                        # gdrive_file_id triggers a drive_sync_job instead.
+                        _dropped = [
+                            f for f in ('face_vectors', 'gdrive_file_id')
+                            if entry.get(f)
+                        ]
+                        if _dropped:
+                            logger.warning(
+                                f"  Fallback upload_complete for {entry['photo_id']} "
+                                f"drops {', '.join(_dropped)} — mesh/sync will compensate"
+                            )
                         self.api.upload_complete(
                             entry['photo_id'], entry['file_size_bytes'],
                             entry['width'], entry['height'],
