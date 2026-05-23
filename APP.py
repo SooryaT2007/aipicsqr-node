@@ -92,7 +92,11 @@ def _active_pid() -> str:
 def _api_post(path: str, body: dict) -> dict:
     url = f'{API_BASE}{path}'
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    req = urllib.request.Request(url, data=data, headers={
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+    })
     try:
         with urllib.request.urlopen(req, timeout=12) as resp:
             return json.loads(resp.read())
