@@ -1,21 +1,15 @@
 """
 Folder Watcher Service
 ======================
-Watches folders for new image files and triggers the upload pipeline.
+Watches local filesystem folders for new image files and triggers the upload pipeline.
 
 Folders are managed dynamically: the main loop calls sync_folders() every
 30 s with the current list from the API, adding/removing watchers as needed.
 
 Each folder entry carries:
-  {id, event_id, path, pool_type, watch_until, storage_type, source_type}
+  {id, event_id, path, pool_type, watch_until}
 
-Two kinds of folders:
-  source_type='local'  — filesystem path; handled by watchdog + initial scan.
-  source_type='gdrive' — GDrive folder (path starts with 'gdrive:'); handled
-                         by a background GDriveScanLoop that calls
-                         api.sync_gdrive_folder() with adaptive backoff.
-
-New local files are submitted to UploadQueue at priority 0 (immediate).
+New files are submitted to UploadQueue at priority 0 (immediate).
 Initial-scan backlog files are submitted at priority 1.
 import_once one-time dumps are submitted at priority 2.
 """
@@ -40,10 +34,6 @@ IMAGE_EXTENSIONS = {
     '.bmp', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw',
 }
 DEBOUNCE_SECONDS = 2.0
-
-# GDrive scan backoff constants (shared design with mesh_worker backoff)
-_GDRIVE_POLL_MIN = 5    # seconds between scans when a new photo was just found
-_GDRIVE_POLL_MAX = 60   # ceiling — cap at 1 minute when idle
 
 
 class PhotoHandler(FileSystemEventHandler):
@@ -87,66 +77,6 @@ class PhotoHandler(FileSystemEventHandler):
                     logger.error(f'Error dispatching {path}: {e}')
 
 
-class GDriveScanLoop:
-    """
-    Background thread that periodically calls api.sync_gdrive_folder() for a
-    single Google Drive source folder.  Uses adaptive backoff: resets to
-    _GDRIVE_POLL_MIN when new photos are found, backs off toward _GDRIVE_POLL_MAX
-    when idle — exactly the same strategy as the mesh worker's selfie loop.
-    """
-
-    def __init__(self, folder: dict, api):
-        self._folder   = folder
-        self._api      = api
-        self._running  = False
-        self._thread: Optional[threading.Thread] = None
-        self._backoff  = _GDRIVE_POLL_MIN
-
-    def start(self):
-        self._running = True
-        self._thread  = threading.Thread(
-            target=self._loop,
-            daemon=True,
-            name=f'gdrive-scan-{self._folder["id"][:8]}',
-        )
-        self._thread.start()
-        logger.info(f'  GDrive scan loop started: {self._folder["path"].split(":")[2] if len(self._folder["path"].split(":")) > 2 else self._folder["id"][:8]}')
-
-    def stop(self):
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
-
-    def _loop(self):
-        while self._running:
-            try:
-                watch_until = self._folder.get('watch_until', '')
-                if watch_until and time.time() > _iso_to_ts(watch_until):
-                    logger.info(f'  GDrive scan: watch_until expired for {self._folder["id"][:8]}')
-                    break
-
-                new_count = self._api.sync_gdrive_folder(self._folder['id'])
-                if new_count > 0:
-                    logger.info(f'  GDrive scan: {new_count} new photo(s) queued')
-                    self._backoff = _GDRIVE_POLL_MIN
-                else:
-                    self._backoff = min(self._backoff * 2, _GDRIVE_POLL_MAX)
-
-                time.sleep(self._backoff)
-            except Exception as e:
-                logger.error(f'GDrive scan loop error: {e}')
-                time.sleep(10)
-
-
-def _iso_to_ts(iso: str) -> float:
-    try:
-        from datetime import datetime, timezone
-        dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
-        return dt.timestamp()
-    except Exception:
-        return float('inf')
-
-
 class FolderWatcher:
     """
     Dynamically watches folders for new image files.
@@ -170,9 +100,6 @@ class FolderWatcher:
         self._observer = Observer()
         self._handler = PhotoHandler(self._dispatch)
 
-        # GDrive source folders: folder_id → GDriveScanLoop
-        self._gdrive_loops: dict[str, GDriveScanLoop] = {}
-
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self):
@@ -182,58 +109,36 @@ class FolderWatcher:
     def stop(self):
         self._observer.stop()
         self._observer.join(timeout=5)
-        for loop in list(self._gdrive_loops.values()):
-            loop.stop()
-        self._gdrive_loops.clear()
         logger.info('Folder Watcher stopped')
 
     # ── Dynamic sync ──────────────────────────────────────────────────────────
 
     def sync_folders(self, active_folders: list[dict]):
-        gdrive_folders = [f for f in active_folders if f['path'].startswith('gdrive:')]
-        local_folders  = [f for f in active_folders if not f['path'].startswith('gdrive:')]
-
-        # ── Local filesystem folders ──────────────────────────────────────────
-        active_paths  = {f['path'] for f in local_folders}
+        active_paths  = {f['path'] for f in active_folders}
         current_paths = set(self._folder_info.keys())
 
-        for folder in local_folders:
+        for folder in active_folders:
             if folder['path'] not in current_paths:
                 self._add_folder(folder)
 
         for path in current_paths - active_paths:
             self._remove_folder(path)
 
-        # ── GDrive source folders (Keep Watching) ─────────────────────────────
-        active_gdrive_ids  = {f['id'] for f in gdrive_folders if f.get('mode') == 'watch'}
-        current_gdrive_ids = set(self._gdrive_loops.keys())
-
-        for folder in gdrive_folders:
-            fid = folder['id']
-            if folder.get('mode') == 'watch' and fid not in current_gdrive_ids:
-                loop = GDriveScanLoop(folder, self._api)
-                self._gdrive_loops[fid] = loop
-                loop.start()
-
-        for fid in current_gdrive_ids - active_gdrive_ids:
-            loop = self._gdrive_loops.pop(fid, None)
-            if loop:
-                loop.stop()
-                logger.info(f'  GDrive scan loop stopped: {fid[:8]}')
-
     # ── One-time import ───────────────────────────────────────────────────────
 
     def import_once(self, folder_path: str, event_id: str,
-                    pool_type: str = 'public', folder_id: Optional[str] = None):
+                    pool_type: str = 'public', folder_id: Optional[str] = None,
+                    storage_type: str = 'r2'):
         """
         Scan a folder once and submit all images to the upload queue.
         Does not start watching. Used for the APP.py "Import Folder" feature.
         """
         folder_info = {
-            'id':       folder_id,
-            'event_id': event_id,
-            'path':     folder_path,
-            'pool_type': pool_type,
+            'id':           folder_id,
+            'event_id':     event_id,
+            'path':         folder_path,
+            'pool_type':    pool_type,
+            'storage_type': storage_type,
         }
         try:
             files = [

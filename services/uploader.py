@@ -6,29 +6,23 @@ Pipeline for processing a new photo:
 2. Compress the image + generate thumbnail (Pillow)
 3. Get presigned R2 URLs from the API (main image + thumbnail)
 4. PUT both files directly to R2 (bypasses our server — no Vercel bandwidth used)
-5. If folder storage_type='gdrive': upload main photo directly to GDrive from
-   local bytes (same bytes just compressed — no extra download).  The node caches
-   the GDrive token + folder IDs per event so this costs one API call per
-   ~55-minute window, not one per photo.
-6. Mark r2_done in SQLite (stores batch metadata for crash recovery)
-7. Accumulate completions in a batch; flush every 10 photos or 5 seconds via the
+5. Mark r2_done in SQLite (stores batch metadata for crash recovery)
+6. Accumulate completions in a batch; flush every 10 photos or 5 seconds via the
    batch API endpoint (reduces Vercel invocations ~50x during bulk dumps)
 
-For GDrive storage folders the batch entry includes gdrive_file_id, which makes
-the server set asset_status='SYNCED_HOT' immediately.  The drive-sync cron then
-only needs to delete the R2 main photo after vectoring completes (fast-path),
-instead of streaming the whole file through Vercel.
+The drive-sync cron on Vercel handles moving main photos from R2 to Google Drive
+for GDrive-destination folders.  Thumbnails stay on R2 for 90 days.
 
 Crash recovery: if the process exits after step 4 but before the batch
 notification completes, recover_r2_done() re-sends those notifications on the
 next startup without re-compressing or re-uploading anything.
 
-Face detection: for trickle photos (priority=0, queue depth < 5) it runs
+Face detection: for trickle photos (priority=0, queue depth < 6) it runs
 inline here and face vectors are sent with the batch notification.  For all
 other photos (import-once, backlog) a vectoring_job is created and the mesh
 node that picks it up runs detection independently.
 
-folder_info dict: {id, event_id, path, pool_type, watch_until, storage_type}
+folder_info dict: {id, event_id, path, pool_type, watch_until}
 """
 
 import concurrent.futures
@@ -37,21 +31,19 @@ import os
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 # Photos arriving via watchdog with fewer than this many items pending in the
 # upload queue are candidates for local (inline) vectorization — no mesh job
 # created, no R2 re-download required.
-_TRICKLE_THRESHOLD = 5
+_TRICKLE_THRESHOLD = 6
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.compressor import compress_image_with_thumbnail
-from services.gdrive_uploader import GDriveUploader
 from services.upload_state import UploadStateDB
 
 _r2_session = requests.Session()
@@ -84,10 +76,6 @@ class PhotoUploader:
         # Track in-flight batch-send threads so stop() can join them
         self._batch_threads: list[threading.Thread] = []
         self._batch_threads_lock = threading.Lock()
-
-        # GDrive config cache: event_id → {access_token, folder_id, expires_at}
-        self._gdrive_cache: dict[str, dict] = {}
-        self._gdrive_cache_lock = threading.Lock()
 
         self._start_flush_timer()
 
@@ -132,8 +120,6 @@ class PhotoUploader:
                 return
         else:
             file_hash = None
-
-        storage_type = (folder_info or {}).get('storage_type', 'r2')
 
         try:
             if self._state_db and file_hash:
@@ -215,10 +201,6 @@ class PhotoUploader:
             _upload_tasks = {'main': _r2_main}
             if thumbnail_url_r2 and thumb_key:
                 _upload_tasks['thumb'] = _r2_thumb
-            if storage_type == 'gdrive':
-                _upload_tasks['gdrive'] = lambda: self._upload_to_gdrive(
-                    event_id, path.name, compressed_bytes
-                )
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(_upload_tasks)) as ex:
                 _upload_futures = {name: ex.submit(fn) for name, fn in _upload_tasks.items()}
@@ -236,10 +218,6 @@ class PhotoUploader:
                     logger.debug(f'  Thumbnail upload failed (non-fatal): {e}')
                     thumb_key = None
 
-            gdrive_file_id = None
-            if 'gdrive' in _upload_futures:
-                gdrive_file_id = _upload_futures['gdrive'].result()  # _upload_to_gdrive never raises
-
             # STEP 6: Persist r2_done + batch data BEFORE enqueueing.
             if self._state_db and file_hash:
                 self._state_db.mark_r2_done(
@@ -256,7 +234,6 @@ class PhotoUploader:
                 'height':          height,
                 'thumbnail_key':   thumb_key,
                 'thumbnail_url':   thumb_public_url,
-                'gdrive_file_id':  gdrive_file_id,
                 '_file_path':      file_path,
             }
             # Include locally-detected face vectors so the server can write them
@@ -264,51 +241,12 @@ class PhotoUploader:
             if local_faces is not None:
                 entry['face_vectors'] = local_faces
             self._enqueue_batch(entry)
-            suffix = f' → GDrive {gdrive_file_id[:8]}' if gdrive_file_id else ''
-            logger.info(f'  Done: {path.name} (batched{suffix})')
+            logger.info(f'  Done: {path.name} (batched)')
 
         except Exception as e:
             logger.error(f'  Failed to process {path.name}: {e}')
             if self._state_db and file_hash:
                 self._state_db.mark_failed(file_path)
-
-    # ── GDrive direct upload ──────────────────────────────────────────────────
-
-    def _upload_to_gdrive(self, event_id: str, filename: str, data: bytes) -> str | None:
-        """Upload bytes to GDrive. Returns file_id or None on any failure."""
-        try:
-            cfg = self._get_gdrive_config(event_id)
-            if not cfg:
-                return None
-            uploader = GDriveUploader(cfg['access_token'], cfg['folder_id'])
-            file_id = uploader.upload(filename, data)
-            logger.debug(f'  GDrive: {filename} → {file_id[:8]}')
-            return file_id
-        except Exception as e:
-            logger.warning(f'  GDrive upload failed — cron will handle it: {e}')
-            return None
-
-    def _get_gdrive_config(self, event_id: str) -> dict | None:
-        """Return cached GDrive config, fetching a fresh one if missing or expired."""
-        now = datetime.now(timezone.utc)
-        with self._gdrive_cache_lock:
-            cfg = self._gdrive_cache.get(event_id)
-            if cfg:
-                try:
-                    expiry = datetime.fromisoformat(cfg['expires_at'].replace('Z', '+00:00'))
-                    if now < expiry:
-                        return cfg
-                except Exception:
-                    pass
-
-        try:
-            fresh = self.api.get_gdrive_upload_config(event_id)
-            with self._gdrive_cache_lock:
-                self._gdrive_cache[event_id] = fresh
-            return fresh
-        except Exception as e:
-            logger.warning(f'  Could not get GDrive upload config: {e}')
-            return None
 
     # ── Trickle vectorization ─────────────────────────────────────────────────
 
@@ -373,17 +311,10 @@ class PhotoUploader:
                 logger.warning(f'  Batch complete failed ({len(batch)} photos): {e}')
                 for entry in batch:
                     try:
-                        # Warn explicitly when high-value fields are silently dropped by the
-                        # single-photo fallback — face_vectors go to a mesh job instead,
-                        # gdrive_file_id triggers a drive_sync_job instead.
-                        _dropped = [
-                            f for f in ('face_vectors', 'gdrive_file_id')
-                            if entry.get(f)
-                        ]
-                        if _dropped:
+                        if entry.get('face_vectors'):
                             logger.warning(
                                 f"  Fallback upload_complete for {entry['photo_id']} "
-                                f"drops {', '.join(_dropped)} — mesh/sync will compensate"
+                                f"drops face_vectors — mesh will compensate"
                             )
                         self.api.upload_complete(
                             entry['photo_id'], entry['file_size_bytes'],
