@@ -92,10 +92,7 @@ class PhotoUploader:
         logger.info(f'Recovery: {len(entries)} file(s) reached R2 but were not confirmed '
                     f'before last shutdown — re-sending notifications now...')
         for e in entries:
-            if e.get('thumbnail_key') and hasattr(self.config, 'r2_public_base'):
-                e['thumbnail_url'] = f"{self.config.r2_public_base}/{e['thumbnail_key']}"
-            else:
-                e['thumbnail_url'] = None
+            e.pop('thumbnail_url', None)
         size = self.config.upload_batch_size
         for i in range(0, len(entries), size):
             self._send_batch(entries[i:i + size])  # synchronous — no thread
@@ -208,12 +205,11 @@ class PhotoUploader:
 
             _upload_futures['main'].result()  # re-raises on R2 failure
 
-            thumb_public_url = None
+            thumb_ok = False
             if 'thumb' in _upload_futures:
                 try:
                     _upload_futures['thumb'].result()
-                    if hasattr(self.config, 'r2_public_base'):
-                        thumb_public_url = f"{self.config.r2_public_base}/{thumb_key}"
+                    thumb_ok = True
                 except Exception as e:
                     logger.debug(f'  Thumbnail upload failed (non-fatal): {e}')
                     thumb_key = None
@@ -233,7 +229,6 @@ class PhotoUploader:
                 'width':           width,
                 'height':          height,
                 'thumbnail_key':   thumb_key,
-                'thumbnail_url':   thumb_public_url,
                 '_file_path':      file_path,
             }
             # Include locally-detected face vectors so the server can write them
@@ -320,7 +315,6 @@ class PhotoUploader:
                             entry['photo_id'], entry['file_size_bytes'],
                             entry['width'], entry['height'],
                             thumbnail_key=entry.get('thumbnail_key'),
-                            thumbnail_url=entry.get('thumbnail_url'),
                         )
                         if self._state_db:
                             self._state_db.mark_complete(entry['_file_path'], entry['photo_id'])
