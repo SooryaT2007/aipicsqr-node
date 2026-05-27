@@ -7,43 +7,29 @@ Pipeline for processing a new photo:
 3. Get presigned R2 URLs from the API (main image + thumbnail)
 4. PUT both files directly to R2 (bypasses our server — no Vercel bandwidth used)
 5. Mark r2_done in SQLite (stores batch metadata for crash recovery)
-6. Accumulate completions in a batch; flush every 10 photos or 5 seconds via the
+6. Accumulate completions in a batch; flush every 10 photos or 2 seconds via the
    batch API endpoint (reduces Vercel invocations ~50x during bulk dumps)
 
-The drive-sync cron on Vercel handles moving main photos from R2 to Google Drive
-for GDrive-destination folders.  Thumbnails stay on R2 for 90 days.
+A vectoring_job is always created server-side so the mesh handles face detection.
 
 Crash recovery: if the process exits after step 4 but before the batch
 notification completes, recover_r2_done() re-sends those notifications on the
 next startup without re-compressing or re-uploading anything.
 
-Face detection: for trickle photos (priority=0, queue depth < 6) it runs
-inline here and face vectors are sent with the batch notification.  For all
-other photos (import-once, backlog) a vectoring_job is created and the mesh
-node that picks it up runs detection independently.
-
 folder_info dict: {id, event_id, path, pool_type, watch_until}
 """
 
-import concurrent.futures
 import logging
-import os
-import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-# Photos arriving via watchdog with fewer than this many items pending in the
-# upload queue are candidates for local (inline) vectorization — no mesh job
-# created, no R2 re-download required.
-_TRICKLE_THRESHOLD = 6
-
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from services.compressor import compress_image_with_thumbnail
+from services.compressor import compress_image, get_image_dimensions
 from services.upload_state import UploadStateDB
 
 _r2_session = requests.Session()
@@ -64,16 +50,12 @@ class PhotoUploader:
         self.config = config
         self.api = api_client
         self._state_db = state_db
-        self._vision_manager = vision_manager
-        self._resource_monitor = resource_monitor
-        self._upload_queue = upload_queue
 
         self._batch: list[dict] = []
         self._batch_lock = threading.Lock()
         self._last_flush = time.time()
         self._flush_timer: Optional[threading.Timer] = None
 
-        # Track in-flight batch-send threads so stop() can join them
         self._batch_threads: list[threading.Thread] = []
         self._batch_threads_lock = threading.Lock()
 
@@ -91,11 +73,9 @@ class PhotoUploader:
             return
         logger.info(f'Recovery: {len(entries)} file(s) reached R2 but were not confirmed '
                     f'before last shutdown — re-sending notifications now...')
-        for e in entries:
-            e.pop('thumbnail_url', None)
         size = self.config.upload_batch_size
         for i in range(0, len(entries), size):
-            self._send_batch(entries[i:i + size])  # synchronous — no thread
+            self._send_batch(entries[i:i + size])
         logger.info('Recovery: complete.')
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -109,7 +89,6 @@ class PhotoUploader:
             logger.warning(f'  No event set — skipping {path.name}')
             return
 
-        # Fast dedup: hash first 64 KB and check DB
         if self._state_db:
             file_hash = UploadStateDB.compute_hash(file_path)
             if file_hash and self._state_db.is_processed(file_path, file_hash, folder_id):
@@ -122,47 +101,29 @@ class PhotoUploader:
             if self._state_db and file_hash:
                 self._state_db.mark_pending(file_path, file_hash, folder_id, event_id)
 
-            # STEP 1: Compress + thumbnail
-            logger.info(f'  Compressing {path.name}...')
-            compressed_bytes, thumbnail_bytes, width, height = compress_image_with_thumbnail(
-                file_path,
-                target_size_mb=self.config.target_size_mb,
-                quality_start=self.config.jpeg_quality_start,
-                quality_min=self.config.jpeg_quality_min,
-                max_dimension=self.config.max_dimension,
-            )
-            file_size = len(compressed_bytes)
-            logger.info(f'  Compressed: {file_size / 1024:.0f} KB ({width}x{height}), '
-                        f'thumb: {len(thumbnail_bytes) / 1024:.0f} KB')
-
-            # STEP 2: Get presigned URLs + trickle vectorization (OPT-13).
-            # For trickle-mode photos (Keep-Watching watchdog, shallow queue) we run
-            # presign and ONNX inference concurrently: the ~100–200 ms presign
-            # round-trip hides behind inference time so the total wait is just
-            # max(presign, inference) instead of the sum.
-            # All other paths (import-once, initial-scan backlog, resource-limited)
-            # keep priority > 0 or have a non-empty queue, so they always skip to
-            # plain mesh-job vectorization.
-            _is_trickle = (
-                priority == 0
-                and self._vision_manager is not None
-                and self._upload_queue is not None
-                and self._vision_manager.is_ready()
-                and not (self._resource_monitor and self._resource_monitor.should_pause())
-                and self._upload_queue.queue_depth() < _TRICKLE_THRESHOLD
-            )
-            local_faces = None
-            if _is_trickle:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    _presign_f = ex.submit(
-                        self.api.get_upload_url, path.name,
-                        event_id=event_id, folder_id=folder_id,
-                    )
-                    _vector_f = ex.submit(self._vectorize_trickle, compressed_bytes, path.name)
-                presign    = _presign_f.result()
-                local_faces = _vector_f.result()  # None → fallback to mesh job
+            # STEP 1: Compress (or read original)
+            upload_quality = (folder_info or {}).get('upload_quality', 'compressed')
+            if upload_quality == 'original':
+                logger.info(f'  Reading {path.name} (original quality)...')
+                with open(file_path, 'rb') as _f:
+                    compressed_bytes = _f.read()
+                file_size = len(compressed_bytes)
+                width, height = get_image_dimensions(file_path)
+                logger.info(f'  Original: {file_size / 1024:.0f} KB ({width}x{height})')
             else:
-                presign = self.api.get_upload_url(path.name, event_id=event_id, folder_id=folder_id)
+                logger.info(f'  Compressing {path.name}...')
+                compressed_bytes, width, height = compress_image(
+                    file_path,
+                    target_size_mb=self.config.target_size_mb,
+                    quality_start=self.config.jpeg_quality_start,
+                    quality_min=self.config.jpeg_quality_min,
+                    max_dimension=self.config.max_dimension,
+                )
+                file_size = len(compressed_bytes)
+                logger.info(f'  Compressed: {file_size / 1024:.0f} KB ({width}x{height})')
+
+            # STEP 2: Get presigned URLs
+            presign = self.api.get_upload_url(path.name, event_id=event_id, folder_id=folder_id)
 
             if presign.get('already_uploaded'):
                 logger.info(f'  Skipping {path.name} — already uploaded (server dedup)')
@@ -170,57 +131,25 @@ class PhotoUploader:
                     self._state_db.mark_complete(file_path, presign.get('photo_id'))
                 return
 
-            upload_url       = presign.get('upload_url')
-            photo_id         = presign.get('photo_id')
+            upload_url = presign.get('upload_url')
+            photo_id   = presign.get('photo_id')
             if not upload_url or not photo_id:
                 raise ValueError(f"Presign response missing fields (got: {list(presign.keys())})")
-            thumbnail_url_r2 = presign.get('thumbnail_upload_url')
-            thumb_key        = presign.get('thumbnail_key')
 
-            # STEP 3–5: Upload main image to R2, thumbnail to R2, and optionally to
-            # GDrive — all in parallel so network I/O overlaps.
-            # Main R2 is critical (raises on failure). Thumbnail and GDrive are
-            # best-effort and never block completion of the main upload.
+            # STEP 3–4: Upload main image to R2
             logger.info(f'  Uploading {path.name}...')
+            _r2_session.put(
+                upload_url, data=compressed_bytes,
+                headers={'Content-Type': 'image/jpeg'}, timeout=60,
+            ).raise_for_status()
 
-            def _r2_main():
-                _r2_session.put(
-                    upload_url, data=compressed_bytes,
-                    headers={'Content-Type': 'image/jpeg'}, timeout=60,
-                ).raise_for_status()
-
-            def _r2_thumb():
-                _r2_session.put(
-                    thumbnail_url_r2, data=thumbnail_bytes,
-                    headers={'Content-Type': 'image/webp'}, timeout=30,
-                ).raise_for_status()
-
-            _upload_tasks = {'main': _r2_main}
-            if thumbnail_url_r2 and thumb_key:
-                _upload_tasks['thumb'] = _r2_thumb
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(_upload_tasks)) as ex:
-                _upload_futures = {name: ex.submit(fn) for name, fn in _upload_tasks.items()}
-            # ThreadPoolExecutor.__exit__ waits for all futures — results are ready here.
-
-            _upload_futures['main'].result()  # re-raises on R2 failure
-
-            thumb_ok = False
-            if 'thumb' in _upload_futures:
-                try:
-                    _upload_futures['thumb'].result()
-                    thumb_ok = True
-                except Exception as e:
-                    logger.debug(f'  Thumbnail upload failed (non-fatal): {e}')
-                    thumb_key = None
-
-            # STEP 6: Persist r2_done + batch data BEFORE enqueueing.
+            # STEP 5: Persist r2_done before enqueueing (crash recovery)
             if self._state_db and file_hash:
                 self._state_db.mark_r2_done(
                     file_path, photo_id=photo_id,
                     file_size_bytes=file_size, width=width, height=height,
-                    thumbnail_key=thumb_key,
-                    face_vectors=local_faces,
+                    thumbnail_key=None,
+                    face_vectors=None,
                 )
 
             entry = {
@@ -228,51 +157,15 @@ class PhotoUploader:
                 'file_size_bytes': file_size,
                 'width':           width,
                 'height':          height,
-                'thumbnail_key':   thumb_key,
                 '_file_path':      file_path,
             }
-            # Include locally-detected face vectors so the server can write them
-            # directly and skip creating a mesh vectoring_job for this photo.
-            if local_faces is not None:
-                entry['face_vectors'] = local_faces
             self._enqueue_batch(entry)
-            logger.info(f'  Done: {path.name} (batched)')
+            logger.info(f'  Done: {path.name} (photo_id={photo_id}, batched)')
 
         except Exception as e:
             logger.error(f'  Failed to process {path.name}: {e}')
             if self._state_db and file_hash:
                 self._state_db.mark_failed(file_path)
-
-    # ── Trickle vectorization ─────────────────────────────────────────────────
-
-    def _vectorize_trickle(self, compressed_bytes: bytes, filename: str) -> Optional[list]:
-        """Write compressed bytes to a temp file and run inline face detection.
-        Returns list of face dicts (possibly empty) or None on timeout/failure
-        (caller falls back to creating a mesh job instead)."""
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                tmp.write(compressed_bytes)
-                tmp_path = tmp.name
-            faces = self._vision_manager.process_image(
-                tmp_path,
-                confidence_threshold=self.config.face_confidence_threshold,
-                timeout=30.0,
-            )
-            if faces is None:
-                logger.warning(f'  Trickle: vision timeout for {filename} — mesh fallback')
-            else:
-                logger.info(f'  Trickle: {len(faces)} face(s) in {filename}')
-            return faces
-        except Exception as e:
-            logger.warning(f'  Trickle vectorization error for {filename}: {e} — mesh fallback')
-            return None
-        finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
 
     # ── Batch flush ───────────────────────────────────────────────────────────
 
@@ -283,7 +176,6 @@ class PhotoUploader:
                 self._flush_locked()
 
     def _flush_locked(self):
-        """Must be called with _batch_lock held."""
         if not self._batch:
             return
         batch = self._batch[:]
@@ -306,15 +198,9 @@ class PhotoUploader:
                 logger.warning(f'  Batch complete failed ({len(batch)} photos): {e}')
                 for entry in batch:
                     try:
-                        if entry.get('face_vectors'):
-                            logger.warning(
-                                f"  Fallback upload_complete for {entry['photo_id']} "
-                                f"drops face_vectors — mesh will compensate"
-                            )
                         self.api.upload_complete(
                             entry['photo_id'], entry['file_size_bytes'],
                             entry['width'], entry['height'],
-                            thumbnail_key=entry.get('thumbnail_key'),
                         )
                         if self._state_db:
                             self._state_db.mark_complete(entry['_file_path'], entry['photo_id'])

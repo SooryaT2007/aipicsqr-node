@@ -52,12 +52,26 @@ def compress_image_with_thumbnail(
 
     final_w, final_h = img.size
 
-    # Generate thumbnail from the already-resized image (no second file open)
+    # Generate thumbnail from the already-resized image (no second file open).
+    # If the result is below 10 KB (e.g. nearly-black frame), bump quality until
+    # it meets the minimum — guests see a blank box otherwise.
     thumb_h = int(final_h * (thumb_width / final_w)) if final_w > 0 else thumb_width
     thumb_img = img.resize((thumb_width, thumb_h), Image.LANCZOS)
     thumb_buf = io.BytesIO()
     thumb_img.save(thumb_buf, format='WEBP', quality=thumb_quality, method=4)
     thumbnail_bytes = thumb_buf.getvalue()
+    _MIN_THUMB_BYTES = 10 * 1024
+    if len(thumbnail_bytes) < _MIN_THUMB_BYTES:
+        for _q in (80, 90, 95):
+            thumb_buf = io.BytesIO()
+            thumb_img.save(thumb_buf, format='WEBP', quality=_q, method=4)
+            thumbnail_bytes = thumb_buf.getvalue()
+            if len(thumbnail_bytes) >= _MIN_THUMB_BYTES:
+                break
+        logger.warning(
+            f'  Thumbnail was undersized — bumped quality, final size: '
+            f'{len(thumbnail_bytes) / 1024:.1f} KB'
+        )
 
     quality = quality_start
     while quality >= quality_min:
@@ -70,6 +84,52 @@ def compress_image_with_thumbnail(
     buffer = io.BytesIO()
     img.save(buffer, format='JPEG', quality=quality_min, optimize=True)
     return buffer.getvalue(), thumbnail_bytes, final_w, final_h
+
+
+def compress_image(
+    file_path: str,
+    target_size_mb: float = 1.5,
+    quality_start: int = 85,
+    quality_min: int = 40,
+    max_dimension: int = 3840,
+) -> tuple[bytes, int, int]:
+    """
+    Compress an image without generating a thumbnail.
+    Returns (compressed_bytes, width, height).
+    """
+    target_bytes = int(target_size_mb * 1024 * 1024)
+
+    img = Image.open(file_path)
+    img = _fix_orientation(img)
+
+    if img.mode not in ('RGB', 'L'):
+        img = img.convert('RGB')
+
+    original_w, original_h = img.size
+    if max(original_w, original_h) > max_dimension:
+        ratio = max_dimension / max(original_w, original_h)
+        img = img.resize((int(original_w * ratio), int(original_h * ratio)), Image.LANCZOS)
+
+    final_w, final_h = img.size
+
+    quality = quality_start
+    while quality >= quality_min:
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=quality, optimize=True)
+        if buffer.tell() <= target_bytes:
+            return buffer.getvalue(), final_w, final_h
+        quality -= 5
+
+    buffer = io.BytesIO()
+    img.save(buffer, format='JPEG', quality=quality_min, optimize=True)
+    return buffer.getvalue(), final_w, final_h
+
+
+def get_image_dimensions(file_path: str) -> tuple[int, int]:
+    """Open image, fix EXIF orientation, return (width, height)."""
+    img = Image.open(file_path)
+    img = _fix_orientation(img)
+    return img.size
 
 
 def _fix_orientation(img: Image.Image) -> Image.Image:
