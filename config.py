@@ -15,7 +15,7 @@ API_BASE_URL  = 'https://dashboard.aipicsqr.com'
 # endpoints required, or behaviour the server needs to handle differently).
 # The server stores this per-node so old installs can be identified and
 # handled gracefully without forcing a reinstall.
-NODE_VERSION  = '2.2.0'
+NODE_VERSION  = '2.3.0'
 
 
 class Config:
@@ -51,7 +51,7 @@ class Config:
         # Parallel upload engine
         self.upload_workers       = 6
         self.upload_batch_size    = 10
-        self.upload_batch_timeout = 5.0
+        self.upload_batch_timeout = 2.0
         self.upload_state_db      = str(BASE_DIR / 'upload_state.db')
         self.upload_stats_file    = str(BASE_DIR / 'upload_stats.json')
         self.node_server_port     = 19432
