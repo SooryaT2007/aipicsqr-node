@@ -1,0 +1,1 @@
+This is the python node which would run on the Photographer's laptop/PC, the web components of the application are in this repo: https://github.com/SooryaT2007/aipicsqr . This node captures the new pictures landed in a folder, acts like a distributed node(hence calling it node) to vectorise the images send by the web application.
